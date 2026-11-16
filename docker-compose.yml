@@ -1,0 +1,14 @@
+services:
+  autoscan:
+    image: autoscan-v2:latest
+    build: .
+    container_name: autoscan
+    restart: unless-stopped
+    # Must own the ./config folder on the host (default image user is 1000:1000).
+    user: "1000:1000"
+    environment:
+      - TZ=Europe/London
+    ports:
+      - "3030:3030"
+    volumes:
+      - ./config:/config
