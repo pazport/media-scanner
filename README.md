@@ -1,5 +1,5 @@
 # Media Scanner
-
+[![Docker image](https://github.com/pazport/media-scanner/actions/workflows/docker.yml/badge.svg)](https://github.com/pazport/media-scanner/actions/workflows/docker.yml) 
 Radarr, Sonarr and Lidarr send webhooks to Media Scanner, which asks **Plex**, **Jellyfin** and/or **Emby** to scan just the folder that changed, so there are no full library scans.
 
 - Choose which media servers each trigger notifies: one, some or all of them.
