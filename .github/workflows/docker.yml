@@ -13,6 +13,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  DOCKERHUB_IMAGE: docker.io/man1234/media-scanner
 
 jobs:
   test:
@@ -28,6 +29,9 @@ jobs:
   image:
     needs: test
     runs-on: ubuntu-latest
+    env:
+      # Docker Hub is used only once both repository secrets are set.
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -41,12 +45,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request' && env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       # latest = main branch; v1.2.3 tags also publish 1.2.3 and 1.2; every build gets sha-xxxxxxx.
       - name: Image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE }}
+          images: |
+            ${{ env.IMAGE }}
+            ${{ env.HAS_DOCKERHUB == 'true' && env.DOCKERHUB_IMAGE || '' }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
