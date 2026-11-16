@@ -1,3 +1,3 @@
-module github.com/pazport/autoscan-v2
+module github.com/pazport/media-scanner
 
 go 1.24

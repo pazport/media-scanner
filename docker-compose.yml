@@ -1,8 +1,8 @@
 services:
-  autoscan:
-    image: autoscan-v2:latest
+  media-scanner:
+    image: media-scanner:latest
     build: .
-    container_name: autoscan
+    container_name: media-scanner
     restart: unless-stopped
     # Must own the ./config folder on the host (default image user is 1000:1000).
     user: "1000:1000"

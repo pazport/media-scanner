@@ -24,7 +24,7 @@ type App struct {
 }
 
 func main() {
-	defPath := os.Getenv("AUTOSCAN_CONFIG")
+	defPath := os.Getenv("MEDIA_SCANNER_CONFIG")
 	if defPath == "" {
 		defPath = "/config/config.json"
 	}
@@ -44,7 +44,7 @@ func main() {
 
 	cfg := store.Get()
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	log.Printf("autoscan %s listening on %s (config: %s)", version, addr, *cfgPath)
+	log.Printf("media-scanner %s listening on %s (config: %s)", version, addr, *cfgPath)
 	srv := &http.Server{Addr: addr, Handler: app.routes(), ReadHeaderTimeout: 10 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }
@@ -137,7 +137,7 @@ func (a *App) auth(next http.Handler) http.Handler {
 		if !ok ||
 			subtle.ConstantTimeCompare([]byte(u), []byte(cfg.Auth.Username)) != 1 ||
 			subtle.ConstantTimeCompare([]byte(p), []byte(cfg.Auth.Password)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="autoscan"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="media-scanner"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

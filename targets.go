@@ -39,13 +39,13 @@ func (t Target) newRequest(method, path string, body io.Reader) (*http.Request, 
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "autoscan-v2")
+	req.Header.Set("User-Agent", "media-scanner")
 	switch t.Type {
 	case "plex":
 		req.Header.Set("X-Plex-Token", t.Token)
 	case "jellyfin":
 		req.Header.Set("Authorization",
-			fmt.Sprintf(`MediaBrowser Client="autoscan", Device="autoscan", DeviceId="autoscan-v2", Version="2", Token="%s"`, t.Token))
+			fmt.Sprintf(`MediaBrowser Client="media-scanner", Device="media-scanner", DeviceId="media-scanner", Version="2", Token="%s"`, t.Token))
 	case "emby":
 		req.Header.Set("X-Emby-Token", t.Token)
 	}
