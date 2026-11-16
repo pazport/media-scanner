@@ -1,0 +1,15 @@
+services:
+  media-scanner:
+    image: ghcr.io/pazport/media-scanner:latest
+    # To build locally instead, comment out "image" above and uncomment:
+    # build: .
+    container_name: media-scanner
+    restart: unless-stopped
+    # Must own the ./config folder on the host (default image user is 1000:1000).
+    user: "1000:1000"
+    environment:
+      - TZ=Europe/London
+    ports:
+      - "3030:3030"
+    volumes:
+      - ./config:/config
