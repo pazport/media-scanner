@@ -40,7 +40,7 @@ docker run -d --name media-scanner -p 3030:3030 -v $(pwd)/config:/config ghcr.io
 
 The GitHub Action in `.github/workflows/docker.yml` runs the tests first. Pull requests build the image but don't push it.
 
-Docker Hub publishing needs two repository secrets (**Settings → Secrets and variables → Actions**): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, a Docker Hub access token with Read & Write access. Without them, images go to GHCR only.
+Docker Hub publishing needs two repository secrets (**Settings → Secrets and variables → Actions**): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, a Docker Hub personal access token with **Read, Write, Delete** access. Docker Hub needs that level of access for the workflow to copy this README to the Docker Hub page. Without the secrets, images go to GHCR only.
 
 To build it yourself: `docker build -t media-scanner .`
 
