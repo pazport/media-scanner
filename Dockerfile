@@ -1,12 +1,14 @@
 # ---- build ----
-FROM golang:1.24-alpine AS build
+# Build on the runner's native platform and cross-compile for the target (no emulation needed).
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./
 COPY web ./web
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -tags timetzdata -ldflags="-s -w -X main.version=${VERSION}" -o /media-scanner . \
- && mkdir -p /out/config /out/tmp
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -tags timetzdata -ldflags="-s -w -X main.version=${VERSION}" -o /media-scanner . \
+ && mkdir -p /out/config
 
 # ---- runtime: empty image, just the static binary ----
 FROM scratch

@@ -11,9 +11,11 @@ Radarr, Sonarr and Lidarr send webhooks to Media Scanner, which asks **Plex**, *
 
 ## Quick start
 
+Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/pazport/media-scanner`.
+
 ```bash
 mkdir config && sudo chown 1000:1000 config
-docker compose up -d --build
+docker compose up -d
 ```
 
 Open `http://<host>:3030`, then:
@@ -25,9 +27,20 @@ Open `http://<host>:3030`, then:
 Plain `docker run`:
 
 ```bash
-docker build -t media-scanner .
-docker run -d --name media-scanner -p 3030:3030 -v $(pwd)/config:/config media-scanner
+docker run -d --name media-scanner -p 3030:3030 -v $(pwd)/config:/config ghcr.io/pazport/media-scanner:latest
 ```
+
+### Image tags
+
+| Tag | Built from |
+|-----|------------|
+| `latest` | every push to `main` |
+| `1.2.3`, `1.2` | git tags like `v1.2.3` |
+| `sha-abc1234` | every published build |
+
+The GitHub Action in `.github/workflows/docker.yml` runs the tests first. Pull requests build the image but don't push it.
+
+To build it yourself: `docker build -t media-scanner .`
 
 The container runs as UID/GID `1000:1000`. Use `user:` in compose (or `--user`) to change it, and make sure that user owns the config folder.
 
