@@ -11,7 +11,7 @@ Radarr, Sonarr and Lidarr send webhooks to Media Scanner, which asks **Plex**, *
 
 ## Quick start
 
-Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/pazport/media-scanner`.
+Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/pazport/media-scanner` and Docker Hub as `man1234/media-scanner`.
 
 ```bash
 mkdir config && sudo chown 1000:1000 config
@@ -39,6 +39,8 @@ docker run -d --name media-scanner -p 3030:3030 -v $(pwd)/config:/config ghcr.io
 | `sha-abc1234` | every published build |
 
 The GitHub Action in `.github/workflows/docker.yml` runs the tests first. Pull requests build the image but don't push it.
+
+Docker Hub publishing needs two repository secrets (**Settings → Secrets and variables → Actions**): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, a Docker Hub personal access token with **Read, Write, Delete** access. Docker Hub needs that level of access for the workflow to copy this README to the Docker Hub page. Without the secrets, images go to GHCR only.
 
 To build it yourself: `docker build -t media-scanner .`
 
