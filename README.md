@@ -53,7 +53,14 @@ Method: `POST`. If auth is on, put the Media Scanner username and password in th
 
 Radarr might see a movie at `/data/media/movies/X`, while Plex sees it at `/movies/X`. Add a rewrite on the Plex server: `/data/media/movies` → `/movies`.
 
-Rewrites are applied in this order: **trigger → global → media server**. Each list uses its first matching prefix.
+Rewrites are applied in this order, and each list uses its first matching prefix:
+
+1. **Trigger:** Triggers tab, e.g. only for Sonarr.
+2. **Global:** Settings tab, for every path.
+3. **Server type:** Settings tab, one list each for all Plex, all Jellyfin and all Emby servers.
+4. **Individual server:** Media Servers tab, on each server's card.
+
+For example, if Radarr uses `/data/media/...`, Plex sees `/media/...` and Jellyfin and Emby both see `/mnt/media/...`, add `/data/media` → `/media` under Plex and `/data/media` → `/mnt/media` under both Jellyfin and Emby.
 
 For Plex, Media Scanner finds the library whose folder contains the rewritten path and refreshes only that path. If no library matches, the dashboard shows an error, which usually means a rewrite is missing.
 
@@ -77,6 +84,11 @@ Everything in the UI is stored in `/config/config.json` (path can be overridden 
   "scan_delay": 10,
   "auth": { "username": "", "password": "" },
   "rewrites": [{ "from": "/data/media", "to": "/media" }],
+  "type_rewrites": {
+    "plex":     [{ "from": "/media", "to": "/plex-media" }],
+    "jellyfin": [],
+    "emby":     []
+  },
   "triggers": {
     "radarr": { "enabled": true, "all_targets": true,  "targets": [], "rewrites": [] },
     "sonarr": { "enabled": true, "all_targets": false, "targets": ["a1b2c3"], "rewrites": [] },

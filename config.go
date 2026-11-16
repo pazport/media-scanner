@@ -45,12 +45,15 @@ type Auth struct {
 }
 
 type Config struct {
-	Port      int                 `json:"port"`
-	ScanDelay int                 `json:"scan_delay"` // seconds to wait/batch before scanning
-	Auth      Auth                `json:"auth"`
-	Rewrites  []Rewrite           `json:"rewrites"` // global, applied to every trigger
-	Triggers  map[string]*Trigger `json:"triggers"`
-	Targets   []Target            `json:"targets"`
+	Port      int       `json:"port"`
+	ScanDelay int       `json:"scan_delay"` // seconds to wait/batch before scanning
+	Auth      Auth      `json:"auth"`
+	Rewrites  []Rewrite `json:"rewrites"` // global, applied to every trigger
+	// TypeRewrites apply to every server of a type (plex, jellyfin, emby),
+	// after global rewrites and before each server's own rewrites.
+	TypeRewrites map[string][]Rewrite `json:"type_rewrites"`
+	Triggers     map[string]*Trigger  `json:"triggers"`
+	Targets      []Target             `json:"targets"`
 }
 
 var triggerNames = []string{"radarr", "sonarr", "lidarr", "manual"}
@@ -96,6 +99,14 @@ func (c *Config) normalize() {
 	if c.Rewrites == nil {
 		c.Rewrites = []Rewrite{}
 	}
+	if c.TypeRewrites == nil {
+		c.TypeRewrites = map[string][]Rewrite{}
+	}
+	for typ := range validTypes {
+		if c.TypeRewrites[typ] == nil {
+			c.TypeRewrites[typ] = []Rewrite{}
+		}
+	}
 	if c.Targets == nil {
 		c.Targets = []Target{}
 	}
@@ -118,6 +129,11 @@ func (c *Config) normalize() {
 func (c *Config) validate() error {
 	if c.Port < 1 || c.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")
+	}
+	for typ := range c.TypeRewrites {
+		if !validTypes[typ] {
+			return fmt.Errorf("type_rewrites: unknown server type %q (use plex, jellyfin or emby)", typ)
+		}
 	}
 	ids := map[string]bool{}
 	for _, t := range c.Targets {

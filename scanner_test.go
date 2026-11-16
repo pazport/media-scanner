@@ -121,9 +121,12 @@ func TestEndToEnd(t *testing.T) {
 	cfg.ScanDelay = 0
 	cfg.Auth = Auth{Username: "u", Password: "p"}
 	cfg.Rewrites = []Rewrite{{From: "/data", To: "/media"}}
+	// Type rewrite for all Plex servers, then Plex's own rewrite on top.
+	cfg.TypeRewrites["plex"] = []Rewrite{{From: "/media", To: "/srv"}}
+	cfg.TypeRewrites["emby"] = []Rewrite{{From: "/media/movies", To: "/emby-movies"}}
 	cfg.Targets = []Target{
 		{ID: "p", Name: "Plex", Type: "plex", URL: plex.URL, Token: "plextoken", Enabled: true,
-			Rewrites: []Rewrite{{From: "/media", To: "/plex"}}},
+			Rewrites: []Rewrite{{From: "/srv", To: "/plex"}}},
 		{ID: "j", Name: "Jellyfin", Type: "jellyfin", URL: jf.URL, Token: "jftoken", Enabled: true},
 		{ID: "e", Name: "Emby", Type: "emby", URL: emby.URL, Token: "embytoken", Enabled: true},
 	}
@@ -174,7 +177,7 @@ func TestEndToEnd(t *testing.T) {
 	if !reflect.DeepEqual(jfHits, []string{"/media/movies/A (2020)", "/media/tv/Show/Season 01"}) {
 		t.Errorf("jellyfin hits: %v", jfHits)
 	}
-	if got := emby.get(); !reflect.DeepEqual(got, []string{"/media/movies/A (2020)"}) {
+	if got := emby.get(); !reflect.DeepEqual(got, []string{"/emby-movies/A (2020)"}) {
 		t.Errorf("emby hits: %v", got)
 	}
 

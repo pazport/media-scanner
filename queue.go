@@ -138,7 +138,7 @@ func (q *Queue) process(p *pending) {
 			continue
 		}
 		sent++
-		path := applyRewrites(p.path, t.Rewrites)
+		path := applyRewrites(applyRewrites(p.path, cfg.TypeRewrites[t.Type]), t.Rewrites)
 		msg, err := t.Scan(path)
 		e := Event{Source: p.source, Path: path, Target: t.Name, Status: "ok", Message: msg}
 		if err != nil {
