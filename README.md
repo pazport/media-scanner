@@ -17,9 +17,34 @@ Radarr, Sonarr and Lidarr send webhooks to Media Scanner, which asks **Plex**, *
 - Optional basic auth for the UI and webhooks.
 - A ~10 MB `FROM scratch` Docker image (about 3 MB compressed) with no dependencies beyond the Go standard library.
 
+## Images
+
+The same image is published to two registries. Use whichever you prefer: both get every release, for `linux/amd64` and `linux/arm64`.
+
+| Registry | Image | Page |
+|----------|-------|------|
+| Docker Hub | `man1234/media-scanner` | [hub.docker.com/r/man1234/media-scanner](https://hub.docker.com/r/man1234/media-scanner) |
+| GitHub Container Registry | `ghcr.io/pazport/media-scanner` | [github.com/pazport/media-scanner/pkgs/container/media-scanner](https://github.com/pazport/media-scanner/pkgs/container/media-scanner) |
+
 ## Quick start
 
-Images for `linux/amd64` and `linux/arm64` are published to `ghcr.io/pazport/media-scanner` and Docker Hub as `man1234/media-scanner`.
+`docker-compose.yml`:
+
+```yaml
+services:
+  media-scanner:
+    image: man1234/media-scanner:latest            # Docker Hub
+    # image: ghcr.io/pazport/media-scanner:latest  # or GitHub Container Registry
+    container_name: media-scanner
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      - TZ=Europe/London
+    ports:
+      - "3030:3030"
+    volumes:
+      - ./config:/config
+```
 
 ```bash
 mkdir config && sudo chown 1000:1000 config
@@ -32,13 +57,25 @@ Open `http://<host>:3030`, then:
 2. **Triggers**: choose which servers Radarr, Sonarr and Lidarr notify.
 3. Click **Save**.
 
-Plain `docker run`:
+Plain `docker run`, from Docker Hub:
+
+```bash
+docker run -d --name media-scanner -p 3030:3030 -v $(pwd)/config:/config man1234/media-scanner:latest
+```
+
+or from GitHub Container Registry:
 
 ```bash
 docker run -d --name media-scanner -p 3030:3030 -v $(pwd)/config:/config ghcr.io/pazport/media-scanner:latest
 ```
 
+To build it yourself: `docker build -t media-scanner .`
+
+The container runs as UID/GID `1000:1000`. Use `user:` in compose (or `--user`) to change it, and make sure that user owns the config folder.
+
 ### Image tags
+
+Both registries have the same tags:
 
 | Tag | Built from |
 |-----|------------|
@@ -46,19 +83,17 @@ docker run -d --name media-scanner -p 3030:3030 -v $(pwd)/config:/config ghcr.io
 | `1.2.3`, `1.2` | each release (see below) |
 | `sha-abc1234` | every published build |
 
-The GitHub Action in `.github/workflows/docker.yml` runs the tests first. Pull requests build the image but don't push it.
+### Publishing
+
+The GitHub Action in `.github/workflows/docker.yml` runs the tests first, then pushes to both registries. Pull requests build the image but don't push it.
+
+Docker Hub publishing needs two repository secrets (**Settings → Secrets and variables → Actions**): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, a Docker Hub personal access token with **Read, Write, Delete** access. Docker Hub needs that level of access for the workflow to copy this README to the Docker Hub page. Without the secrets, images go to GHCR only.
 
 ### Releases
 
 Every merge to `main` is released automatically. The workflow takes the newest `vX.Y.Z` tag, adds one to the last number (`v1.0.0` → `v1.0.1`), builds and pushes the image with those version tags, then creates the git tag and a GitHub release with notes listing the merged pull requests. Re-running a build for a commit that's already released reuses its version instead of making a new one.
 
 To bump the minor or major version, publish a release yourself with the new number, e.g. `v1.1.0` (**Releases → Draft a new release**, create the tag on `main`). The images are built for that tag, and later merges continue from it: `v1.1.1`, `v1.1.2`, and so on.
-
-Docker Hub publishing needs two repository secrets (**Settings → Secrets and variables → Actions**): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, a Docker Hub personal access token with **Read, Write, Delete** access. Docker Hub needs that level of access for the workflow to copy this README to the Docker Hub page. Without the secrets, images go to GHCR only.
-
-To build it yourself: `docker build -t media-scanner .`
-
-The container runs as UID/GID `1000:1000`. Use `user:` in compose (or `--user`) to change it, and make sure that user owns the config folder.
 
 ## Connecting Radarr / Sonarr / Lidarr
 

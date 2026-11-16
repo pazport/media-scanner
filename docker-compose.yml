@@ -1,6 +1,7 @@
 services:
   media-scanner:
-    image: ghcr.io/pazport/media-scanner:latest
+    image: man1234/media-scanner:latest            # Docker Hub
+    # image: ghcr.io/pazport/media-scanner:latest  # or GitHub Container Registry
     # To build locally instead, comment out "image" above and uncomment:
     # build: .
     container_name: media-scanner
