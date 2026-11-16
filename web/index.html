@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autoscan</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='10' fill='%234f8cff'/><path d='M8 12l3 3 5-6' stroke='white' stroke-width='2.5' fill='none'/></svg>">
+<style>
+  :root {
+    --bg: #0f1218; --panel: #171b23; --panel2: #1e2330; --border: #2a3040;
+    --text: #e6e9ef; --muted: #8b93a7; --accent: #4f8cff; --ok: #3ecf8e;
+    --err: #ff5d6c; --warn: #f5b041;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+           background: var(--panel); border-bottom: 1px solid var(--border);
+           position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  header h1 span { color: var(--accent); }
+  nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  nav button { background: none; border: 0; color: var(--muted); padding: 8px 12px;
+               border-radius: 6px; cursor: pointer; font: inherit; }
+  nav button.active, nav button:hover { background: var(--panel2); color: var(--text); }
+  .spacer { flex: 1; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 80px; }
+  section { display: none; } section.active { display: block; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+          padding: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  .card h3 { font-size: 14px; margin: 16px 0 8px; color: var(--muted); font-weight: 500; }
+  label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  input, select { width: 100%; background: var(--bg); color: var(--text);
+                  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font: inherit; }
+  input:focus, select:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  input[type=checkbox] { width: auto; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+  .btn { background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+         border-radius: 6px; padding: 8px 14px; cursor: pointer; font: inherit; white-space: nowrap; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
+  .btn.danger { color: var(--err); }
+  .btn.small { padding: 4px 10px; font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .stat b { display: block; font-size: 24px; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+  td.path { font-family: ui-monospace, monospace; word-break: break-all; }
+  .table-wrap { overflow-x: auto; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 11px;
+           background: var(--panel2); border: 1px solid var(--border); }
+  .badge.ok { color: var(--ok); border-color: var(--ok); }
+  .badge.error { color: var(--err); border-color: var(--err); }
+  .badge.queued, .badge.pending { color: var(--warn); border-color: var(--warn); }
+  .badge.plex { color: #e5a00d; } .badge.jellyfin { color: #aa5cc3; } .badge.emby { color: #52b54b; }
+  .target { border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 12px; background: var(--panel2); }
+  .target-head { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .target-head strong { flex: 1; }
+  .rw { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .rw span { color: var(--muted); }
+  .muted { color: var(--muted); }
+  .hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+  code { background: var(--bg); border: 1px solid var(--border); padding: 1px 6px; border-radius: 4px;
+         font-size: 12px; word-break: break-all; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { display: flex; gap: 6px; align-items: center; padding: 4px 10px; border: 1px solid var(--border);
+          border-radius: 99px; background: var(--bg); cursor: pointer; color: var(--text); font-size: 13px; }
+  .test-result { font-size: 12px; margin-top: 8px; }
+  .test-result.ok { color: var(--ok); } .test-result.err { color: var(--err); }
+  #toast { position: fixed; bottom: 20px; right: 20px; left: 20px; margin-left: auto; max-width: 420px;
+           padding: 12px 16px; border-radius: 8px; background: var(--panel2); border: 1px solid var(--border);
+           display: none; z-index: 10; }
+  #toast.ok { border-color: var(--ok); } #toast.err { border-color: var(--err); }
+  #dirty { color: var(--warn); font-size: 12px; display: none; }
+  .empty { color: var(--muted); text-align: center; padding: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Auto<span>scan</span></h1>
+  <nav>
+    <button data-tab="dashboard" class="active">Dashboard</button>
+    <button data-tab="targets">Media Servers</button>
+    <button data-tab="triggers">Triggers</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+  <div class="spacer"></div>
+  <span id="dirty">Unsaved changes</span>
+  <button class="btn primary" id="save">Save</button>
+</header>
+
+<main>
+  <!-- Dashboard -->
+  <section id="dashboard" class="active">
+    <div class="stats" id="stats"></div>
+    <div class="card">
+      <h2>Manual scan</h2>
+      <div class="row">
+        <input id="manual-path" placeholder="/data/media/movies/Example (2024)" style="flex:1;min-width:220px">
+        <button class="btn primary" id="manual-go">Scan</button>
+      </div>
+      <p class="hint">Uses the Manual trigger's media server selection and path rewrites.</p>
+    </div>
+    <div class="card">
+      <h2>Pending</h2>
+      <div class="table-wrap"><table><thead><tr><th>Due</th><th>Source</th><th>Path</th></tr></thead>
+        <tbody id="pending"></tbody></table></div>
+    </div>
+    <div class="card">
+      <h2>Recent activity</h2>
+      <div class="table-wrap"><table><thead><tr><th>Time</th><th>Status</th><th>Source</th><th>Server</th><th>Path</th><th>Message</th></tr></thead>
+        <tbody id="history"></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- Targets -->
+  <section id="targets">
+    <div class="card">
+      <div class="row" style="margin-bottom:12px">
+        <h2 style="margin:0;flex:1">Media servers</h2>
+        <button class="btn" data-add="plex">+ Plex</button>
+        <button class="btn" data-add="jellyfin">+ Jellyfin</button>
+        <button class="btn" data-add="emby">+ Emby</button>
+      </div>
+      <div id="target-list"></div>
+    </div>
+  </section>
+
+  <!-- Triggers -->
+  <section id="triggers">
+    <div id="trigger-list"></div>
+  </section>
+
+  <!-- Settings -->
+  <section id="settings">
+    <div class="card">
+      <h2>General</h2>
+      <div class="grid">
+        <div><label>Port</label><input type="number" id="s-port" min="1" max="65535">
+          <p class="hint">Needs a container restart to take effect.</p></div>
+        <div><label>Scan delay (seconds)</label><input type="number" id="s-delay" min="0">
+          <p class="hint">Waits this long and merges duplicate requests before scanning.</p></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Authentication</h2>
+      <div class="grid">
+        <div><label>Username</label><input id="s-user" autocomplete="off"></div>
+        <div><label>Password</label><input id="s-pass" type="password" autocomplete="new-password"></div>
+      </div>
+      <p class="hint">Leave the username empty to turn authentication off. When set, the web UI and webhooks
+        need these credentials — enter the same username and password in the Radarr/Sonarr webhook settings.</p>
+    </div>
+    <div class="card">
+      <h2>Global path rewrites</h2>
+      <p class="hint" style="margin-bottom:10px">Applied to every incoming path, before per-server rewrites.</p>
+      <div id="global-rw"></div>
+    </div>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let cfg = null, dirty = false;
+const TRIGGERS = {
+  radarr: { name: 'Radarr', desc: 'Settings → Connect → + → Webhook. Method POST. Tick On Import, On Upgrade, On Rename, On Movie Delete, On Movie File Delete.' },
+  sonarr: { name: 'Sonarr', desc: 'Settings → Connect → + → Webhook. Method POST. Tick On Import, On Upgrade, On Rename, On Series Delete, On Episode File Delete.' },
+  lidarr: { name: 'Lidarr', desc: 'Settings → Connect → + → Webhook. Method POST. Tick On Release Import, On Upgrade, On Rename, On Track Retag.' },
+  manual: { name: 'Manual', desc: 'Used by the Dashboard scan box. Also: POST /triggers/manual?path=/some/folder' },
+};
+
+function toast(msg, ok = true) {
+  const t = $('#toast'); t.textContent = msg; t.className = ok ? 'ok' : 'err'; t.style.display = 'block';
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 4000);
+}
+function setDirty(v = true) { dirty = v; $('#dirty').style.display = v ? 'inline' : 'none'; }
+
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: body ? {'Content-Type': 'application/json'} : {},
+                              body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+// ---------- tabs ----------
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('section').forEach(s => s.classList.toggle('active', s.id === b.dataset.tab));
+});
+
+// ---------- rewrites editor ----------
+function rewriteEditor(container, list) {
+  const render = () => {
+    container.innerHTML = '';
+    list.forEach((rw, i) => {
+      const row = document.createElement('div'); row.className = 'rw';
+      row.innerHTML = `<input placeholder="From: /data/movies" value="${esc(rw.from)}"><span>→</span>
+        <input placeholder="To: /movies" value="${esc(rw.to)}"><button class="btn small danger">✕</button>`;
+      const [from, to] = row.querySelectorAll('input');
+      from.oninput = () => { rw.from = from.value; setDirty(); };
+      to.oninput = () => { rw.to = to.value; setDirty(); };
+      row.querySelector('button').onclick = () => { list.splice(i, 1); setDirty(); render(); };
+      container.appendChild(row);
+    });
+    const add = document.createElement('button'); add.className = 'btn small'; add.textContent = '+ Add rewrite';
+    add.onclick = () => { list.push({from: '', to: ''}); setDirty(); render(); };
+    container.appendChild(add);
+  };
+  render();
+}
+
+// ---------- targets ----------
+const PLACEHOLDER = { plex: 'http://plex:32400', jellyfin: 'http://jellyfin:8096', emby: 'http://emby:8096' };
+const TOKEN_HINT = {
+  plex: 'Your X-Plex-Token (see Plex support article "Finding an authentication token").',
+  jellyfin: 'Dashboard → API Keys → +',
+  emby: 'Settings → Advanced → API Keys → New API Key',
+};
+function renderTargets() {
+  const list = $('#target-list'); list.innerHTML = '';
+  if (!cfg.targets.length) list.innerHTML = '<div class="empty">No media servers yet. Add Plex, Jellyfin or Emby above.</div>';
+  cfg.targets.forEach((t, i) => {
+    const el = document.createElement('div'); el.className = 'target';
+    el.innerHTML = `
+      <div class="target-head">
+        <span class="badge ${t.type}">${t.type}</span><strong>${esc(t.name)}</strong>
+        <label class="chip"><input type="checkbox" data-f="enabled" ${t.enabled ? 'checked' : ''}> Enabled</label>
+        <button class="btn small" data-act="test">Test</button>
+        <button class="btn small danger" data-act="del">Delete</button>
+      </div>
+      <div class="grid">
+        <div><label>Name</label><input data-f="name" value="${esc(t.name)}"></div>
+        <div><label>URL</label><input data-f="url" value="${esc(t.url)}" placeholder="${PLACEHOLDER[t.type]}"></div>
+        <div><label>${t.type === 'plex' ? 'Plex token' : 'API key'}</label>
+          <input data-f="token" type="password" value="${esc(t.token)}" autocomplete="off">
+          <p class="hint">${TOKEN_HINT[t.type]}</p></div>
+      </div>
+      <h3>Path rewrites for this server</h3>
+      <div class="rws"></div>
+      <div class="test-result"></div>`;
+    el.querySelectorAll('[data-f]').forEach(inp => inp.oninput = inp.onchange = () => {
+      t[inp.dataset.f] = inp.type === 'checkbox' ? inp.checked : inp.value;
+      if (inp.dataset.f === 'name') el.querySelector('strong').textContent = inp.value;
+      setDirty();
+      if (inp.dataset.f === 'name') renderTriggers();
+    });
+    el.querySelector('[data-act=del]').onclick = () => {
+      if (!confirm(`Delete ${t.name}?`)) return;
+      cfg.targets.splice(i, 1);
+      Object.values(cfg.triggers).forEach(tr => tr.targets = tr.targets.filter(id => id !== t.id));
+      setDirty(); renderTargets(); renderTriggers();
+    };
+    el.querySelector('[data-act=test]').onclick = async () => {
+      const out = el.querySelector('.test-result'); out.className = 'test-result'; out.textContent = 'Testing…';
+      try {
+        const r = await api('POST', '/api/test', t);
+        out.className = 'test-result ' + (r.ok ? 'ok' : 'err'); out.textContent = r.message;
+      } catch (e) { out.className = 'test-result err'; out.textContent = e.message; }
+    };
+    rewriteEditor(el.querySelector('.rws'), t.rewrites);
+    list.appendChild(el);
+  });
+}
+document.querySelectorAll('[data-add]').forEach(b => b.onclick = () => {
+  const type = b.dataset.add;
+  const id = Math.random().toString(16).slice(2, 14);
+  cfg.targets.push({ id, type, name: type[0].toUpperCase() + type.slice(1), url: PLACEHOLDER[type],
+                     token: '', enabled: true, rewrites: [] });
+  setDirty(); renderTargets(); renderTriggers();
+});
+
+// ---------- triggers ----------
+function renderTriggers() {
+  const list = $('#trigger-list'); list.innerHTML = '';
+  const base = location.origin;
+  Object.entries(TRIGGERS).forEach(([key, meta]) => {
+    const tr = cfg.triggers[key];
+    const el = document.createElement('div'); el.className = 'card';
+    const all = tr.all_targets;
+    el.innerHTML = `
+      <div class="row" style="margin-bottom:8px"><h2 style="margin:0;flex:1">${meta.name}</h2>
+        <label class="chip"><input type="checkbox" class="en" ${tr.enabled ? 'checked' : ''}> Enabled</label></div>
+      <p class="muted" style="margin:0 0 6px">Webhook URL: <code>${esc(base)}/triggers/${key}</code></p>
+      <p class="hint" style="margin-bottom:12px">${esc(meta.desc)}</p>
+      <h3>Send scans to</h3>
+      <div class="chips">
+        <label class="chip"><input type="checkbox" class="all" ${all ? 'checked' : ''}> All media servers</label>
+        ${cfg.targets.map(t => `<label class="chip"><input type="checkbox" class="tg" value="${t.id}"
+           ${all || tr.targets.includes(t.id) ? 'checked' : ''} ${all ? 'disabled' : ''}>
+           <span class="badge ${t.type}">${t.type}</span> ${esc(t.name)}</label>`).join('')}
+      </div>
+      <h3>Path rewrites for this trigger</h3>
+      <div class="rws"></div>`;
+    el.querySelector('.en').onchange = e => { tr.enabled = e.target.checked; setDirty(); };
+    el.querySelector('.all').onchange = e => {
+      tr.all_targets = e.target.checked;
+      if (!tr.all_targets && !tr.targets.length) tr.targets = cfg.targets.map(t => t.id);
+      setDirty(); renderTriggers();
+    };
+    el.querySelectorAll('.tg').forEach(cb => cb.onchange = () => {
+      tr.targets = [...el.querySelectorAll('.tg:checked')].map(x => x.value);
+      if (!tr.targets.length) toast('No servers ticked: this trigger will not notify anything.', false);
+      setDirty();
+    });
+    rewriteEditor(el.querySelector('.rws'), tr.rewrites);
+    list.appendChild(el);
+  });
+}
+function prepareForSave(c) {
+  const copy = JSON.parse(JSON.stringify(c));
+  for (const tr of Object.values(copy.triggers)) {
+    tr.rewrites = tr.rewrites.filter(r => r.from);
+  }
+  copy.rewrites = copy.rewrites.filter(r => r.from);
+  copy.targets.forEach(t => t.rewrites = t.rewrites.filter(r => r.from));
+  return copy;
+}
+
+// ---------- settings ----------
+function renderSettings() {
+  $('#s-port').value = cfg.port; $('#s-delay').value = cfg.scan_delay;
+  $('#s-user').value = cfg.auth.username; $('#s-pass').value = cfg.auth.password;
+  rewriteEditor($('#global-rw'), cfg.rewrites);
+}
+$('#s-port').oninput = e => { cfg.port = parseInt(e.target.value) || 0; setDirty(); };
+$('#s-delay').oninput = e => { cfg.scan_delay = parseInt(e.target.value) || 0; setDirty(); };
+$('#s-user').oninput = e => { cfg.auth.username = e.target.value; setDirty(); };
+$('#s-pass').oninput = e => { cfg.auth.password = e.target.value; setDirty(); };
+
+// ---------- save / load ----------
+$('#save').onclick = async () => {
+  try {
+    const r = await api('PUT', '/api/config', prepareForSave(cfg));
+    cfg = r.config; setDirty(false); renderAll();
+    toast(r.notice ? 'Saved. ' + r.notice : 'Settings saved to config file.');
+  } catch (e) { toast('Save failed: ' + e.message, false); }
+};
+window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+
+function renderAll() { renderTargets(); renderTriggers(); renderSettings(); }
+
+async function load() {
+  cfg = await api('GET', '/api/config');
+  renderAll();
+}
+
+// ---------- dashboard ----------
+$('#manual-go').onclick = async () => {
+  const p = $('#manual-path').value.trim(); if (!p) return;
+  try { await api('POST', '/triggers/manual', { paths: [p] }); toast('Queued ' + p); $('#manual-path').value = ''; refresh(); }
+  catch (e) { toast(e.message, false); }
+};
+$('#manual-path').onkeydown = e => { if (e.key === 'Enter') $('#manual-go').click(); };
+
+const fmtTime = t => new Date(t).toLocaleString();
+async function refresh() {
+  try {
+    const s = await api('GET', '/api/status');
+    const st = s.stats || {};
+    $('#stats').innerHTML = [
+      ['Media servers', cfg ? cfg.targets.filter(t => t.enabled).length : 0],
+      ['Pending', s.pending.length], ['Scans sent', st.ok || 0], ['Errors', st.error || 0],
+    ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
+    $('#pending').innerHTML = s.pending.length ? s.pending.map(e =>
+      `<tr><td>${fmtTime(e.time)}</td><td>${esc(e.source)}</td><td class="path">${esc(e.path)}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="empty">Nothing queued</td></tr>';
+    $('#history').innerHTML = s.history.length ? s.history.map(e =>
+      `<tr><td style="white-space:nowrap">${fmtTime(e.time)}</td><td><span class="badge ${e.status}">${e.status}</span></td>
+       <td>${esc(e.source)}</td><td>${esc(e.target)}</td><td class="path">${esc(e.path)}</td><td>${esc(e.message)}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="empty">No activity yet. Send a test from Radarr or Sonarr.</td></tr>';
+  } catch (e) { /* server restarting */ }
+}
+
+load().then(refresh).catch(e => toast('Could not load config: ' + e.message, false));
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
