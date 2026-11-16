@@ -1,5 +1,4 @@
 # Media Scanner
-[![Docker image](https://github.com/pazport/media-scanner/actions/workflows/docker.yml/badge.svg)](https://github.com/pazport/media-scanner/actions/workflows/docker.yml) 
 
 [![Docker image](https://github.com/pazport/media-scanner/actions/workflows/docker.yml/badge.svg)](https://github.com/pazport/media-scanner/actions/workflows/docker.yml)
 [![Latest release](https://img.shields.io/github/v/release/pazport/media-scanner?logo=github&sort=semver)](https://github.com/pazport/media-scanner/releases/latest)
