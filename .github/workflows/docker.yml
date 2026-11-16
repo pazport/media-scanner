@@ -30,11 +30,48 @@ jobs:
   image:
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create release tags
+      packages: write
+    # One build per ref at a time, so two quick merges can't claim the same version.
+    concurrency:
+      group: image-${{ github.ref }}
+      cancel-in-progress: false
     env:
       # Docker Hub is used only once both repository secrets are set.
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # all tags, to work out the next version
+
+      # Pushes to main get the next patch version (v1.0.0 -> v1.0.1).
+      # Pushing a vX.Y.Z tag yourself uses that version, e.g. to bump minor or major.
+      - name: Release version
+        id: version
+        if: github.event_name == 'push'
+        run: |
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          create=false
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="$GITHUB_REF_NAME"
+          elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            # A re-run of a commit that is already released reuses its version.
+            tag=$(git tag --points-at HEAD | grep -E "$semver" | sort -V | tail -1 || true)
+            if [ -z "$tag" ]; then
+              last=$(git tag | grep -E "$semver" | sort -V | tail -1 || true)
+              if [ -z "$last" ]; then
+                tag=v1.0.0
+              else
+                IFS=. read -r major minor patch <<< "${last#v}"
+                tag="v$major.$minor.$((patch + 1))"
+              fi
+              create=true
+            fi
+          fi
+          echo "Version: ${tag:-none} (new release: $create)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "create=$create" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v4
 
@@ -53,8 +90,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # latest = main branch (by name, not "default branch"); v1.2.3 tags also publish 1.2.3 and 1.2;
-      # every build gets sha-xxxxxxx.
+      # latest = main branch; releases publish 1.2.3 and 1.2; every build gets sha-xxxxxxx.
       - name: Image tags
         id: meta
         uses: docker/metadata-action@v6
@@ -64,8 +100,8 @@ jobs:
             ${{ env.HAS_DOCKERHUB == 'true' && env.DOCKERHUB_IMAGE || '' }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.tag }},enable=${{ steps.version.outputs.tag != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.tag }},enable=${{ steps.version.outputs.tag != '' }}
             type=sha
             type=ref,event=pr
 
@@ -91,3 +127,12 @@ jobs:
           repository: man1234/media-scanner
           short-description: Radarr/Sonarr/Lidarr webhooks to targeted Plex, Jellyfin and Emby library scans
           readme-filepath: ./README.md
+
+      # Tag the commit and publish a GitHub release with notes from the merged pull requests.
+      # (A release created with GITHUB_TOKEN doesn't start another workflow run, so no duplicate build.)
+      - name: Create GitHub release
+        if: steps.version.outputs.create == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --generate-notes

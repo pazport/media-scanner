@@ -43,10 +43,16 @@ docker run -d --name media-scanner -p 3030:3030 -v $(pwd)/config:/config ghcr.io
 | Tag | Built from |
 |-----|------------|
 | `latest` | every push to `main` |
-| `1.2.3`, `1.2` | git tags like `v1.2.3` |
+| `1.2.3`, `1.2` | each release (see below) |
 | `sha-abc1234` | every published build |
 
 The GitHub Action in `.github/workflows/docker.yml` runs the tests first. Pull requests build the image but don't push it.
+
+### Releases
+
+Every merge to `main` is released automatically. The workflow takes the newest `vX.Y.Z` tag, adds one to the last number (`v1.0.0` → `v1.0.1`), builds and pushes the image with those version tags, then creates the git tag and a GitHub release with notes listing the merged pull requests. Re-running a build for a commit that's already released reuses its version instead of making a new one.
+
+To bump the minor or major version, publish a release yourself with the new number, e.g. `v1.1.0` (**Releases → Draft a new release**, create the tag on `main`). The images are built for that tag, and later merges continue from it: `v1.1.1`, `v1.1.2`, and so on.
 
 Docker Hub publishing needs two repository secrets (**Settings → Secrets and variables → Actions**): `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, a Docker Hub personal access token with **Read, Write, Delete** access. Docker Hub needs that level of access for the workflow to copy this README to the Docker Hub page. Without the secrets, images go to GHCR only.
 
