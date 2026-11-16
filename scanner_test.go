@@ -65,7 +65,11 @@ type fakeServer struct {
 }
 
 func (f *fakeServer) record(s string) { f.mu.Lock(); f.hits = append(f.hits, s); f.mu.Unlock() }
-func (f *fakeServer) get() []string   { f.mu.Lock(); defer f.mu.Unlock(); return append([]string{}, f.hits...) }
+func (f *fakeServer) get() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.hits...)
+}
 
 func newFakePlex() *fakeServer {
 	f := &fakeServer{}

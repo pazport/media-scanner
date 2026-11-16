@@ -1,6 +1,6 @@
-# Autoscan v2
+# Media Scanner
 
-Radarr, Sonarr and Lidarr send webhooks to Autoscan, and Autoscan asks **Plex**, **Jellyfin** and/or **Emby** to scan just the folder that changed, so there are no full library scans.
+Radarr, Sonarr and Lidarr send webhooks to Media Scanner, which asks **Plex**, **Jellyfin** and/or **Emby** to scan just the folder that changed, so there are no full library scans.
 
 - Choose which media servers each trigger notifies: one, some or all of them.
 - Path rewrites (global, per trigger and per server) handle containers that mount media at different paths.
@@ -25,8 +25,8 @@ Open `http://<host>:3030`, then:
 Plain `docker run`:
 
 ```bash
-docker build -t autoscan-v2 .
-docker run -d --name autoscan -p 3030:3030 -v $(pwd)/config:/config autoscan-v2
+docker build -t media-scanner .
+docker run -d --name media-scanner -p 3030:3030 -v $(pwd)/config:/config media-scanner
 ```
 
 The container runs as UID/GID `1000:1000`. Use `user:` in compose (or `--user`) to change it, and make sure that user owns the config folder.
@@ -37,11 +37,11 @@ In each app: **Settings → Connect → + → Webhook**
 
 | App    | URL                                    | Events                                                         |
 |--------|----------------------------------------|----------------------------------------------------------------|
-| Radarr | `http://autoscan:3030/triggers/radarr` | On Import, On Upgrade, On Rename, On Movie Delete, On Movie File Delete |
-| Sonarr | `http://autoscan:3030/triggers/sonarr` | On Import, On Upgrade, On Rename, On Series Delete, On Episode File Delete |
-| Lidarr | `http://autoscan:3030/triggers/lidarr` | On Release Import, On Upgrade, On Rename, On Track Retag      |
+| Radarr | `http://media-scanner:3030/triggers/radarr` | On Import, On Upgrade, On Rename, On Movie Delete, On Movie File Delete |
+| Sonarr | `http://media-scanner:3030/triggers/sonarr` | On Import, On Upgrade, On Rename, On Series Delete, On Episode File Delete |
+| Lidarr | `http://media-scanner:3030/triggers/lidarr` | On Release Import, On Upgrade, On Rename, On Track Retag      |
 
-Method: `POST`. If auth is on, put the Autoscan username and password in the webhook's Username/Password fields. Click **Test** in the app, and the event appears on the Autoscan dashboard.
+Method: `POST`. If auth is on, put the Media Scanner username and password in the webhook's Username/Password fields. Click **Test** in the app, and the event appears on the Media Scanner dashboard.
 
 ## Tokens
 
@@ -55,21 +55,21 @@ Radarr might see a movie at `/data/media/movies/X`, while Plex sees it at `/movi
 
 Rewrites are applied in this order: **trigger → global → media server**. Each list uses its first matching prefix.
 
-For Plex, Autoscan finds the library whose folder contains the rewritten path and refreshes only that path. If no library matches, the dashboard shows an error, which usually means a rewrite is missing.
+For Plex, Media Scanner finds the library whose folder contains the rewritten path and refreshes only that path. If no library matches, the dashboard shows an error, which usually means a rewrite is missing.
 
 ## Manual scans
 
 Use the dashboard, or:
 
 ```bash
-curl -X POST "http://autoscan:3030/triggers/manual?path=/movies/Some%20Movie%20(2024)"
+curl -X POST "http://media-scanner:3030/triggers/manual?path=/movies/Some%20Movie%20(2024)"
 ```
 
 You can also send JSON to choose servers by ID: `{"paths": ["/movies/X"], "targets": ["<target id>"]}`.
 
 ## Config file
 
-Everything in the UI is stored in `/config/config.json` (path can be overridden with `AUTOSCAN_CONFIG` or `-config`). You can edit it by hand, but restart the container afterwards. Changes made in the UI apply straight away, except the port, which needs a restart.
+Everything in the UI is stored in `/config/config.json` (path can be overridden with `MEDIA_SCANNER_CONFIG` or `-config`). You can edit it by hand, but restart the container afterwards. Changes made in the UI apply straight away, except the port, which needs a restart.
 
 ```json
 {
