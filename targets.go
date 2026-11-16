@@ -98,6 +98,7 @@ func (t Target) Scan(path string) (string, error) {
 type plexSection struct {
 	Key      string `json:"key"`
 	Title    string `json:"title"`
+	Type     string `json:"type"` // movie, show, artist, photo
 	Location []struct {
 		Path string `json:"path"`
 	} `json:"Location"`
