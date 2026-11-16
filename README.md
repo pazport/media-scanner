@@ -1,5 +1,13 @@
 # Media Scanner
 
+[![Docker image](https://github.com/pazport/media-scanner/actions/workflows/docker.yml/badge.svg)](https://github.com/pazport/media-scanner/actions/workflows/docker.yml)
+[![Latest release](https://img.shields.io/github/v/release/pazport/media-scanner?logo=github&sort=semver)](https://github.com/pazport/media-scanner/releases/latest)
+[![GitHub stars](https://img.shields.io/github/stars/pazport/media-scanner?logo=github&style=flat)](https://github.com/pazport/media-scanner/stargazers)
+[![Docker pulls](https://img.shields.io/docker/pulls/man1234/media-scanner?logo=docker&logoColor=white)](https://hub.docker.com/r/man1234/media-scanner)
+[![Docker stars](https://img.shields.io/docker/stars/man1234/media-scanner?logo=docker&logoColor=white)](https://hub.docker.com/r/man1234/media-scanner)
+[![Image size](https://img.shields.io/docker/image-size/man1234/media-scanner/latest?logo=docker&logoColor=white)](https://hub.docker.com/r/man1234/media-scanner/tags)
+[![GHCR](https://img.shields.io/badge/ghcr.io-pazport%2Fmedia--scanner-blue?logo=github)](https://github.com/pazport/media-scanner/pkgs/container/media-scanner)
+
 Radarr, Sonarr and Lidarr send webhooks to Media Scanner, which asks **Plex**, **Jellyfin** and/or **Emby** to scan just the folder that changed, so there are no full library scans.
 
 - Choose which media servers each trigger notifies: one, some or all of them.
