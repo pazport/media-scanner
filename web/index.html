@@ -158,8 +158,16 @@
     </div>
     <div class="card">
       <h2>Global path rewrites</h2>
-      <p class="hint" style="margin-bottom:10px">Applied to every incoming path, before per-server rewrites.</p>
+      <p class="hint" style="margin-bottom:10px">Applied to every incoming path, before server-type and per-server rewrites.</p>
       <div id="global-rw"></div>
+    </div>
+    <div class="card">
+      <h2>Path rewrites by server type</h2>
+      <p class="hint" style="margin-bottom:10px">Applied to every server of that type, after global rewrites and before
+        each server's own rewrites (Media Servers tab).</p>
+      <h3><span class="badge plex">plex</span> All Plex servers</h3><div id="type-rw-plex"></div>
+      <h3><span class="badge jellyfin">jellyfin</span> All Jellyfin servers</h3><div id="type-rw-jellyfin"></div>
+      <h3><span class="badge emby">emby</span> All Emby servers</h3><div id="type-rw-emby"></div>
     </div>
   </section>
 </main>
@@ -320,6 +328,7 @@ function prepareForSave(c) {
     tr.rewrites = tr.rewrites.filter(r => r.from);
   }
   copy.rewrites = copy.rewrites.filter(r => r.from);
+  for (const k of Object.keys(copy.type_rewrites)) copy.type_rewrites[k] = copy.type_rewrites[k].filter(r => r.from);
   copy.targets.forEach(t => t.rewrites = t.rewrites.filter(r => r.from));
   return copy;
 }
@@ -329,6 +338,7 @@ function renderSettings() {
   $('#s-port').value = cfg.port; $('#s-delay').value = cfg.scan_delay;
   $('#s-user').value = cfg.auth.username; $('#s-pass').value = cfg.auth.password;
   rewriteEditor($('#global-rw'), cfg.rewrites);
+  for (const typ of ['plex', 'jellyfin', 'emby']) rewriteEditor($('#type-rw-' + typ), cfg.type_rewrites[typ]);
 }
 $('#s-port').oninput = e => { cfg.port = parseInt(e.target.value) || 0; setDirty(); };
 $('#s-delay').oninput = e => { cfg.scan_delay = parseInt(e.target.value) || 0; setDirty(); };
