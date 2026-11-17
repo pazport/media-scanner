@@ -64,6 +64,8 @@ type LibraryCheck struct {
 	IgnoreFolders []string `json:"ignore_folders"`
 	// File name endings (before the extension, case-insensitive) that are skipped.
 	IgnoreSuffixes []string `json:"ignore_suffixes"`
+	// Don't follow symlinked files and folders (they are followed by default).
+	IgnoreSymlinks bool `json:"ignore_symlinks"`
 }
 
 var (

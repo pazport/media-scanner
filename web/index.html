@@ -72,6 +72,15 @@
           border-radius: 99px; background: var(--bg); cursor: pointer; color: var(--text); font-size: 13px; }
   .test-result { font-size: 12px; margin-top: 8px; }
   .test-result.ok { color: var(--ok); } .test-result.err { color: var(--err); }
+  .progress { height: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 99px;
+              overflow: hidden; margin: 6px 0 10px; }
+  .progress > div { height: 100%; background: var(--accent); border-radius: 99px; transition: width .4s; }
+  .progress.busy > div { width: 30%; animation: slide 1.2s infinite linear; }
+  @keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+  @media (prefers-reduced-motion: reduce) { .progress.busy > div { animation: none; width: 100%; opacity: .4; } }
+  .prog-step { margin: 0 0 2px; } .prog-step.done { color: var(--muted); }
+  .prog-current { color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0; }
   #toast { position: fixed; bottom: 20px; right: 20px; left: 20px; margin-left: auto; max-width: 420px;
            padding: 12px 16px; border-radius: 8px; background: var(--panel2); border: 1px solid var(--border);
            display: none; z-index: 10; }
@@ -171,6 +180,9 @@
           <div><label>Ignore file names ending in (comma separated)</label><input id="lc-ignore-suffix">
             <p class="hint">Matched before the extension, e.g. <code>-trailer</code>.</p></div>
         </div>
+        <label class="chip" style="margin-top:12px;width:fit-content"><input type="checkbox" id="lc-follow"> Follow symlinks</label>
+        <p class="hint">Counts symlinked files and walks into symlinked folders. A link's target must also be mounted
+          into this container, or it shows up as a broken link.</p>
       </details>
     </div>
     <div class="card">
@@ -414,6 +426,7 @@ function renderCheck() {
   $('#lc-ext').value = lc.extensions.join(', ');
   $('#lc-ignore-dirs').value = lc.ignore_folders.join(', ');
   $('#lc-ignore-suffix').value = lc.ignore_suffixes.join(', ');
+  $('#lc-follow').checked = !lc.ignore_symlinks;
   // folder list
   const box = $('#lc-paths'); box.innerHTML = '';
   lc.paths.forEach((p, i) => {
@@ -450,34 +463,70 @@ $('#lc-cooldown').oninput = e => { cfg.library_check.cooldown_minutes = parseInt
 $('#lc-ext').oninput = e => { cfg.library_check.extensions = csv(e.target.value); setDirty(); };
 $('#lc-ignore-dirs').oninput = e => { cfg.library_check.ignore_folders = csv(e.target.value); setDirty(); };
 $('#lc-ignore-suffix').oninput = e => { cfg.library_check.ignore_suffixes = csv(e.target.value); setDirty(); };
+$('#lc-follow').onchange = e => { cfg.library_check.ignore_symlinks = !e.target.checked; setDirty(); };
 $('#lc-run').onclick = async () => {
   if (dirty) { toast('Save your changes first.', false); return; }
-  try { await api('POST', '/api/check/run'); toast('Library check started.'); setTimeout(refreshCheck, 1000); }
+  try { await api('POST', '/api/check/run'); toast('Library check started.'); setTimeout(refreshCheck, 300); }
   catch (e) { toast(e.message, false); }
 };
 const folderList = (dirs, label) => !dirs.length ? '' :
   `<details style="margin-top:6px"><summary style="cursor:pointer">${dirs.length} ${label}</summary>
    <ul class="path" style="margin:6px 0 0;padding-left:18px">${dirs.map(d => `<li>${esc(d)}</li>`).join('')}</ul></details>`;
+const num = n => Number(n || 0).toLocaleString();
+const bar = (done, total) => total > 0
+  ? `<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${done}"><div style="width:${Math.min(100, done / total * 100).toFixed(1)}%"></div></div>`
+  : '<div class="progress busy" role="progressbar" aria-label="In progress"><div></div></div>';
+function renderProgress(p) {
+  const secs = Math.max(0, Math.round((Date.now() - new Date(p.started)) / 1000));
+  const elapsed = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  const steps = p.servers ? 1 + p.servers : null;
+  const out = [`<p><b>Checking now…</b> <span class="muted">(${elapsed})</span></p>`];
+  const filesLine = `Found <b>${num(p.files)}</b> media files in ${num(p.folders)} folders`;
+  if (p.step === 'files') {
+    out.push(`<p class="prog-step">Step 1: looking for media files. ${filesLine} so far.</p>`, bar(0, 0));
+    if (p.current) out.push(`<p class="prog-current" title="${esc(p.current)}">${esc(p.current)}</p>`);
+  } else {
+    out.push(`<p class="prog-step done">Step 1 of ${steps}: ${filesLine}. ✓</p>`);
+    const lib = p.current ? ` library <b>${esc(p.current)}</b>` : '';
+    const count = p.total > 0 ? `${num(p.items)} of ${num(p.total)} items` : `${num(p.items)} items`;
+    out.push(`<p class="prog-step">Step ${1 + p.index} of ${steps}: asking <span class="badge ${p.type}">${p.type}</span> ${esc(p.server)}
+      (server ${p.index} of ${p.servers})${lib}: ${count} received.</p>`, bar(p.items, p.total));
+  }
+  return out.join('');
+}
+// Update the status without closing any list the user has expanded.
+let lastStatus = '';
+function setStatus(html) {
+  if (html === lastStatus) return;
+  lastStatus = html;
+  const box = $('#lc-status');
+  const open = [...box.querySelectorAll('details')].map(d => d.open);
+  box.innerHTML = html;
+  box.querySelectorAll('details').forEach((d, i) => { if (open[i]) d.open = true; });
+}
 async function refreshCheck() {
   try {
     const s = await api('GET', '/api/check');
     const parts = [];
-    if (s.running) parts.push('<p><b>Checking now…</b></p>');
+    if (s.running && s.progress) parts.push(renderProgress(s.progress));
     if (s.enabled && s.next && !s.running) parts.push(`<p>Next check: ${fmtTime(s.next)}</p>`);
-    if (!s.enabled) parts.push('<p>The library check is turned off. Tick <b>Enabled</b> and save to run it on a schedule.</p>');
+    if (!s.enabled && !s.running) parts.push('<p>The library check is turned off. Tick <b>Enabled</b> and save to run it on a schedule.</p>');
     const r = s.last;
     if (r) {
-      parts.push(`<p>Last run ${fmtTime(r.started)}, took ${esc(r.duration)}. Found <b>${r.files}</b> media files on disk.</p>`);
+      parts.push(`<p>${s.running ? 'Previous' : 'Last'} run ${fmtTime(r.started)}, took ${esc(r.duration)}. Found <b>${num(r.files)}</b> media files in ${num(r.folders)} folders.</p>`);
+      if (r.broken_links) parts.push(`<p class="test-result err">Skipped ${num(r.broken_links)} broken symlink(s): their targets
+        can't be found inside this container. Mount the folders the links point to, at the same paths.</p>` +
+        folderList(r.broken_sample, r.broken_links > r.broken_sample.length ? 'examples' : 'link(s)'));
       r.errors.forEach(e => parts.push(`<p class="test-result err">${esc(e)}</p>`));
       parts.push(`<div class="table-wrap"><table><thead><tr><th>Server</th><th>Files on server</th><th>Missing</th><th>Details</th></tr></thead><tbody>` +
         (r.targets.length ? r.targets.map(t => `<tr><td><span class="badge ${t.type}">${t.type}</span> ${esc(t.target)}</td>
-          <td>${t.error ? '–' : t.known}</td><td>${t.error ? '–' : t.missing}</td>
+          <td>${t.error ? '–' : num(t.known)}</td><td>${t.error ? '–' : num(t.missing)}</td>
           <td>${t.error ? `<span class="test-result err">${esc(t.error)}</span>` :
             (!t.missing ? '<span class="badge ok">all found</span>' : '') +
             folderList(t.queued, 'folder(s) sent for scanning') + folderList(t.waiting, 'folder(s) still missing, waiting before re-scanning')}</td></tr>`).join('')
           : '<tr><td colspan="4" class="empty">No media servers selected.</td></tr>') + '</tbody></table></div>');
     }
-    $('#lc-status').innerHTML = parts.join('') || 'No check has run yet.';
+    setStatus(parts.join('') || 'No check has run yet.');
   } catch (e) { /* server restarting */ }
 }
 
@@ -517,7 +566,7 @@ async function refresh() {
 
 load().then(refresh).then(refreshCheck).catch(e => toast('Could not load config: ' + e.message, false));
 setInterval(refresh, 3000);
-setInterval(refreshCheck, 5000);
+setInterval(refreshCheck, 2000);
 </script>
 </body>
 </html>

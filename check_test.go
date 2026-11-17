@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,9 +51,10 @@ func TestFindMedia(t *testing.T) {
 	lc := LibraryCheck{Paths: []string{root}}
 	lc.normalize()
 	lc.MinAgeMinutes = 10
-	files, errs := findMedia(lc, time.Now())
-	if len(errs) > 0 {
-		t.Fatal(errs)
+	walked := findMedia(lc, time.Now(), nil)
+	files := walked.Files
+	if len(walked.Errors) > 0 {
+		t.Fatal(walked.Errors)
 	}
 	for i := range files {
 		files[i], _ = filepath.Rel(root, files[i])
@@ -69,7 +71,7 @@ func TestFindMedia(t *testing.T) {
 
 	// A missing folder is reported, not fatal.
 	lc.Paths = []string{filepath.Join(root, "nope")}
-	if _, errs := findMedia(lc, time.Now()); len(errs) != 1 {
+	if errs := findMedia(lc, time.Now(), nil).Errors; len(errs) != 1 {
 		t.Errorf("expected 1 error for missing folder, got %v", errs)
 	}
 }
@@ -277,5 +279,142 @@ func TestLibraryCheckConfigDefaults(t *testing.T) {
 	c.LibraryCheck.Paths = []string{"relative/path"}
 	if err := c.validate(); err == nil {
 		t.Error("relative folder should be rejected")
+	}
+}
+
+func TestCheckProgress(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range []string{"a/1.mkv", "a/2.mkv", "b/3.mkv"} {
+		writeFile(t, filepath.Join(root, f), time.Hour)
+	}
+
+	// findMedia reports running totals per folder and a final total.
+	lc := LibraryCheck{Paths: []string{root}}
+	lc.normalize()
+	var lastFolders, lastFiles int
+	files := findMedia(lc, time.Now(), func(folders, files int, _ string) { lastFolders, lastFiles = folders, files }).Files
+	if lastFolders != 3 || lastFiles != 3 || len(files) != 3 {
+		t.Errorf("folders=%d files=%d found=%d", lastFolders, lastFiles, len(files))
+	}
+
+	// A Jellyfin that pauses on its second page, so the progress can be read mid-check.
+	defer func(n int) { pageSize = n }(pageSize)
+	pageSize = 2
+	paused, release := make(chan struct{}), make(chan struct{})
+	jf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		all := []string{"/x/a/1.mkv", "/x/a/2.mkv", "/x/b/3.mkv"}
+		start, _ := strconv.Atoi(r.URL.Query().Get("StartIndex"))
+		if start > 0 {
+			close(paused)
+			<-release
+		}
+		type item struct{ Path string }
+		out := struct {
+			Items            []item
+			TotalRecordCount int
+		}{Items: []item{}, TotalRecordCount: len(all)}
+		for i := start; i < len(all) && i < start+2; i++ {
+			out.Items = append(out.Items, item{all[i]})
+		}
+		json.NewEncoder(w).Encode(out)
+	}))
+	defer jf.Close()
+
+	store, err := loadStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := store.Get()
+	cfg.Targets = []Target{{ID: "j", Name: "Jellyfin", Type: "jellyfin", URL: jf.URL, Enabled: true,
+		Rewrites: []Rewrite{{From: root, To: "/x"}}}}
+	cfg.LibraryCheck.Paths = []string{root}
+	cfg.LibraryCheck.MinAgeMinutes = 0
+	if err := store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+	checker := newChecker(store, newQueue(store))
+	done := make(chan bool)
+	go func() { done <- checker.Run() }()
+
+	<-paused
+	st := checker.Status()
+	p, ok := st["progress"].(*CheckProgress)
+	if !ok || st["running"] != true {
+		t.Fatalf("expected progress while running, got %+v", st)
+	}
+	if p.Step != "server" || p.Server != "Jellyfin" || p.Index != 1 || p.Servers != 1 ||
+		p.Items != 2 || p.Total != 3 || p.Files != 3 || p.Folders != 3 {
+		t.Errorf("progress mid-check: %+v", *p)
+	}
+	close(release)
+	<-done
+	if _, ok := checker.Status()["progress"]; ok {
+		t.Error("progress should not be reported after the check finished")
+	}
+	if res := checker.Status()["last"].(*CheckResult); res.Targets[0].Known != 3 || res.Targets[0].Missing != 0 {
+		t.Errorf("result: %+v", res.Targets[0])
+	}
+}
+
+func TestFindMediaSymlinks(t *testing.T) {
+	// Real files live outside the checked folder; the library is made of links to them.
+	store := t.TempDir()
+	writeFile(t, filepath.Join(store, "Movie A (2020).mkv"), time.Hour)
+	writeFile(t, filepath.Join(store, "shows/Show/Season 01/S01E01.mkv"), time.Hour)
+	writeFile(t, filepath.Join(store, "new.mkv"), time.Minute) // too new, via a link
+
+	lib := t.TempDir()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(lib, "movies/Movie A (2020)"), 0o755))
+	// symlinked file
+	must(os.Symlink(filepath.Join(store, "Movie A (2020).mkv"), filepath.Join(lib, "movies/Movie A (2020)/Movie A (2020).mkv")))
+	// symlinked folder
+	must(os.Symlink(filepath.Join(store, "shows/Show"), filepath.Join(lib, "Show")))
+	// link to a file that is too new
+	must(os.Symlink(filepath.Join(store, "new.mkv"), filepath.Join(lib, "new.mkv")))
+	// broken link (target not mounted)
+	must(os.Symlink("/mnt/remote/not-here/B.mkv", filepath.Join(lib, "movies/B.mkv")))
+	// loop: a folder link back to the library root
+	must(os.Symlink(lib, filepath.Join(lib, "movies/loop")))
+
+	lc := LibraryCheck{Paths: []string{lib}}
+	lc.normalize()
+	lc.MinAgeMinutes = 10
+	got := findMedia(lc, time.Now(), nil)
+	rel := []string{}
+	for _, f := range got.Files {
+		r, _ := filepath.Rel(lib, f)
+		rel = append(rel, r)
+	}
+	sort.Strings(rel)
+	want := []string{"Show/Season 01/S01E01.mkv", "movies/Movie A (2020)/Movie A (2020).mkv"}
+	if !reflect.DeepEqual(rel, want) {
+		t.Errorf("files: got %v want %v", rel, want)
+	}
+	if got.Broken != 1 || len(got.BrokenSample) != 1 || !strings.HasSuffix(got.BrokenSample[0], "movies/B.mkv") {
+		t.Errorf("broken: %d %v", got.Broken, got.BrokenSample)
+	}
+	if len(got.Errors) != 0 {
+		t.Errorf("errors: %v", got.Errors)
+	}
+
+	// With symlinks ignored, none of the linked media is found.
+	lc.IgnoreSymlinks = true
+	if got := findMedia(lc, time.Now(), nil); len(got.Files) != 0 || got.Broken != 0 {
+		t.Errorf("ignore symlinks: files=%v broken=%d", got.Files, got.Broken)
+	}
+
+	// A checked folder that is itself a symlink is followed.
+	link := filepath.Join(t.TempDir(), "media")
+	must(os.Symlink(lib, link))
+	lc.IgnoreSymlinks = false
+	lc.Paths = []string{link}
+	if got := findMedia(lc, time.Now(), nil); len(got.Files) != 2 {
+		t.Errorf("symlinked root: %v %v", got.Files, got.Errors)
 	}
 }
