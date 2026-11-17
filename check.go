@@ -35,6 +35,21 @@ type CheckResult struct {
 	Targets  []TargetCheck `json:"targets"`
 }
 
+// CheckProgress describes a check that is running, for the web UI.
+type CheckProgress struct {
+	Started time.Time `json:"started"`
+	Step    string    `json:"step"`    // "files" while walking folders, "server" while asking a server
+	Folders int       `json:"folders"` // folders looked through so far
+	Files   int       `json:"files"`   // media files found so far
+	Current string    `json:"current"` // folder being walked, or server library being listed
+	Server  string    `json:"server"`  // server being asked
+	Type    string    `json:"type"`
+	Index   int       `json:"index"` // 1-based number of the server being asked
+	Servers int       `json:"servers"`
+	Items   int       `json:"items"` // items received from the current server (library)
+	Total   int       `json:"total"` // total the server reported, 0 if unknown
+}
+
 // Checker runs the periodic library check.
 type Checker struct {
 	store *Store
@@ -42,6 +57,7 @@ type Checker struct {
 
 	mu       sync.Mutex
 	running  bool
+	progress CheckProgress
 	last     *CheckResult
 	lastRun  time.Time
 	cooldown map[string]time.Time // target ID + "\x00" + folder -> last scan request
@@ -57,6 +73,10 @@ func (c *Checker) Status() map[string]any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := map[string]any{"running": c.running, "last": c.last, "enabled": cfg.LibraryCheck.Enabled}
+	if c.running {
+		p := c.progress
+		st["progress"] = &p
+	}
 	if cfg.LibraryCheck.Enabled {
 		next := time.Now()
 		if !c.lastRun.IsZero() {
@@ -91,6 +111,7 @@ func (c *Checker) Run() bool {
 	}
 	c.running = true
 	c.lastRun = time.Now()
+	c.progress = CheckProgress{Started: c.lastRun, Step: "files"}
 	c.mu.Unlock()
 
 	res := c.check(c.store.Get())
@@ -115,7 +136,9 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 
 	// Files on disk, already rewritten into the shared path form the queue expects
 	// (library check rewrites, then global rewrites).
-	files, walkErrs := findMedia(lc, time.Now())
+	files, walkErrs := findMedia(lc, time.Now(), func(folders, files int, current string) {
+		c.update(func(p *CheckProgress) { p.Folders, p.Files, p.Current = folders, files, current })
+	})
 	res.Errors = append(res.Errors, walkErrs...)
 	res.Files = len(files)
 	canon := make([]string, len(files))
@@ -133,10 +156,18 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 	}
 	cooldown := time.Duration(lc.CooldownMinutes) * time.Minute
 
+	var targets []Target
 	for _, t := range cfg.Targets {
-		if !t.Enabled || (!lc.AllTargets && !selected[t.ID]) {
-			continue
+		if t.Enabled && (lc.AllTargets || selected[t.ID]) {
+			targets = append(targets, t)
 		}
+	}
+
+	for i, t := range targets {
+		c.update(func(p *CheckProgress) {
+			p.Step, p.Server, p.Type, p.Index, p.Servers = "server", t.Name, t.Type, i+1, len(targets)
+			p.Current, p.Items, p.Total = "", 0, 0
+		})
 		tc := TargetCheck{Target: t.Name, Type: t.Type, Queued: []string{}, Waiting: []string{}}
 		toServer := func(p string) string {
 			return applyRewrites(applyRewrites(p, cfg.TypeRewrites[t.Type]), t.Rewrites)
@@ -145,7 +176,9 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 		for i, r := range roots {
 			serverRoots[i] = toServer(r)
 		}
-		known, err := t.KnownFiles(serverRoots)
+		known, err := t.KnownFiles(serverRoots, func(library string, items, total int) {
+			c.update(func(p *CheckProgress) { p.Current, p.Items, p.Total = library, items, total })
+		})
 		if err != nil {
 			tc.Error = err.Error()
 			res.Targets = append(res.Targets, tc)
@@ -198,8 +231,16 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 	return res
 }
 
+// update changes the progress shown while a check runs.
+func (c *Checker) update(f func(*CheckProgress)) {
+	c.mu.Lock()
+	f(&c.progress)
+	c.mu.Unlock()
+}
+
 // findMedia walks the configured folders and returns media file paths.
-func findMedia(lc LibraryCheck, now time.Time) ([]string, []string) {
+// progress, if not nil, is called for every folder with the running totals.
+func findMedia(lc LibraryCheck, now time.Time, progress func(folders, files int, current string)) ([]string, []string) {
 	exts := map[string]bool{}
 	for _, e := range lc.Extensions {
 		exts[e] = true
@@ -210,6 +251,7 @@ func findMedia(lc LibraryCheck, now time.Time) ([]string, []string) {
 	}
 	minAge := time.Duration(lc.MinAgeMinutes) * time.Minute
 	var files, errs []string
+	folders := 0
 	for _, root := range lc.Paths {
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -222,6 +264,10 @@ func findMedia(lc LibraryCheck, now time.Time) ([]string, []string) {
 			if d.IsDir() {
 				if p != root && (strings.HasPrefix(name, ".") || ignoreDirs[strings.ToLower(name)]) {
 					return filepath.SkipDir
+				}
+				folders++
+				if progress != nil {
+					progress(folders, len(files), filepath.ToSlash(p))
 				}
 				return nil
 			}
@@ -251,6 +297,9 @@ func findMedia(lc LibraryCheck, now time.Time) ([]string, []string) {
 			errs = append(errs, fmt.Sprintf("%s: %v", root, err))
 		}
 	}
+	if progress != nil {
+		progress(folders, len(files), "")
+	}
 	return files, errs
 }
 
@@ -264,14 +313,21 @@ func normPath(p string) string {
 	return path.Clean(p)
 }
 
+// pageProgress reports, after each page, the library being listed, the items
+// received from it so far and its total size (0 if the server didn't say).
+type pageProgress func(library string, items, total int)
+
 // KnownFiles returns the (normalised) paths of every media file the server
-// has indexed under any of roots.
-func (t Target) KnownFiles(roots []string) (map[string]bool, error) {
+// has indexed under any of roots. progress may be nil.
+func (t Target) KnownFiles(roots []string, progress pageProgress) (map[string]bool, error) {
+	if progress == nil {
+		progress = func(string, int, int) {}
+	}
 	switch t.Type {
 	case "plex":
-		return t.plexFiles(roots)
+		return t.plexFiles(roots, progress)
 	case "jellyfin", "emby":
-		return t.embyFiles()
+		return t.embyFiles(progress)
 	}
 	return nil, fmt.Errorf("unknown target type %q", t.Type)
 }
@@ -284,7 +340,7 @@ func overlaps(a, b string) bool {
 
 var pageSize = 1000 // items per request when listing a library (a var so tests can page)
 
-func (t Target) plexFiles(roots []string) (map[string]bool, error) {
+func (t Target) plexFiles(roots []string, progress pageProgress) (map[string]bool, error) {
 	secs, err := t.plexSections()
 	if err != nil {
 		return nil, err
@@ -308,6 +364,8 @@ func (t Target) plexFiles(roots []string) (map[string]bool, error) {
 		if !relevant {
 			continue
 		}
+		progress(sec.Title, 0, 0)
+		received := 0
 		for start := 0; ; start += pageSize {
 			q := url.Values{
 				"type":                   {typ},
@@ -324,7 +382,8 @@ func (t Target) plexFiles(roots []string) (map[string]bool, error) {
 			}
 			var res struct {
 				MediaContainer struct {
-					Metadata []struct {
+					TotalSize int `json:"totalSize"`
+					Metadata  []struct {
 						Media []struct {
 							Part []struct {
 								File string `json:"file"`
@@ -345,6 +404,8 @@ func (t Target) plexFiles(roots []string) (map[string]bool, error) {
 					}
 				}
 			}
+			received += len(res.MediaContainer.Metadata)
+			progress(sec.Title, received, res.MediaContainer.TotalSize)
 			if len(res.MediaContainer.Metadata) < pageSize {
 				break
 			}
@@ -353,8 +414,9 @@ func (t Target) plexFiles(roots []string) (map[string]bool, error) {
 	return known, nil
 }
 
-func (t Target) embyFiles() (map[string]bool, error) {
+func (t Target) embyFiles(progress pageProgress) (map[string]bool, error) {
 	known := map[string]bool{}
+	progress("", 0, 0)
 	for start := 0; ; start += pageSize {
 		q := url.Values{
 			"Recursive":        {"true"},
@@ -395,6 +457,7 @@ func (t Target) embyFiles() (map[string]bool, error) {
 				}
 			}
 		}
+		progress("", start+len(res.Items), res.TotalRecordCount)
 		if len(res.Items) < pageSize || (res.TotalRecordCount > 0 && start+len(res.Items) >= res.TotalRecordCount) {
 			break
 		}

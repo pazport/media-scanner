@@ -50,7 +50,7 @@ func TestFindMedia(t *testing.T) {
 	lc := LibraryCheck{Paths: []string{root}}
 	lc.normalize()
 	lc.MinAgeMinutes = 10
-	files, errs := findMedia(lc, time.Now())
+	files, errs := findMedia(lc, time.Now(), nil)
 	if len(errs) > 0 {
 		t.Fatal(errs)
 	}
@@ -69,7 +69,7 @@ func TestFindMedia(t *testing.T) {
 
 	// A missing folder is reported, not fatal.
 	lc.Paths = []string{filepath.Join(root, "nope")}
-	if _, errs := findMedia(lc, time.Now()); len(errs) != 1 {
+	if _, errs := findMedia(lc, time.Now(), nil); len(errs) != 1 {
 		t.Errorf("expected 1 error for missing folder, got %v", errs)
 	}
 }
@@ -277,5 +277,79 @@ func TestLibraryCheckConfigDefaults(t *testing.T) {
 	c.LibraryCheck.Paths = []string{"relative/path"}
 	if err := c.validate(); err == nil {
 		t.Error("relative folder should be rejected")
+	}
+}
+
+func TestCheckProgress(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range []string{"a/1.mkv", "a/2.mkv", "b/3.mkv"} {
+		writeFile(t, filepath.Join(root, f), time.Hour)
+	}
+
+	// findMedia reports running totals per folder and a final total.
+	lc := LibraryCheck{Paths: []string{root}}
+	lc.normalize()
+	var lastFolders, lastFiles int
+	files, _ := findMedia(lc, time.Now(), func(folders, files int, _ string) { lastFolders, lastFiles = folders, files })
+	if lastFolders != 3 || lastFiles != 3 || len(files) != 3 {
+		t.Errorf("folders=%d files=%d found=%d", lastFolders, lastFiles, len(files))
+	}
+
+	// A Jellyfin that pauses on its second page, so the progress can be read mid-check.
+	defer func(n int) { pageSize = n }(pageSize)
+	pageSize = 2
+	paused, release := make(chan struct{}), make(chan struct{})
+	jf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		all := []string{"/x/a/1.mkv", "/x/a/2.mkv", "/x/b/3.mkv"}
+		start, _ := strconv.Atoi(r.URL.Query().Get("StartIndex"))
+		if start > 0 {
+			close(paused)
+			<-release
+		}
+		type item struct{ Path string }
+		out := struct {
+			Items            []item
+			TotalRecordCount int
+		}{Items: []item{}, TotalRecordCount: len(all)}
+		for i := start; i < len(all) && i < start+2; i++ {
+			out.Items = append(out.Items, item{all[i]})
+		}
+		json.NewEncoder(w).Encode(out)
+	}))
+	defer jf.Close()
+
+	store, err := loadStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := store.Get()
+	cfg.Targets = []Target{{ID: "j", Name: "Jellyfin", Type: "jellyfin", URL: jf.URL, Enabled: true,
+		Rewrites: []Rewrite{{From: root, To: "/x"}}}}
+	cfg.LibraryCheck.Paths = []string{root}
+	cfg.LibraryCheck.MinAgeMinutes = 0
+	if err := store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+	checker := newChecker(store, newQueue(store))
+	done := make(chan bool)
+	go func() { done <- checker.Run() }()
+
+	<-paused
+	st := checker.Status()
+	p, ok := st["progress"].(*CheckProgress)
+	if !ok || st["running"] != true {
+		t.Fatalf("expected progress while running, got %+v", st)
+	}
+	if p.Step != "server" || p.Server != "Jellyfin" || p.Index != 1 || p.Servers != 1 ||
+		p.Items != 2 || p.Total != 3 || p.Files != 3 || p.Folders != 3 {
+		t.Errorf("progress mid-check: %+v", *p)
+	}
+	close(release)
+	<-done
+	if _, ok := checker.Status()["progress"]; ok {
+		t.Error("progress should not be reported after the check finished")
+	}
+	if res := checker.Status()["last"].(*CheckResult); res.Targets[0].Known != 3 || res.Targets[0].Missing != 0 {
+		t.Errorf("result: %+v", res.Targets[0])
 	}
 }

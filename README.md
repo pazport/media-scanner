@@ -149,6 +149,8 @@ Set it up on the **Library Check** tab:
 
 The status area shows when the last check ran, how many files each server knows, and which folders were sent for scanning or are waiting to be re-scanned. **Run check now** starts one straight away.
 
+While a check runs, the status updates every 2 seconds with its progress: how many media files and folders it has found so far (and the folder it's in), then which server it's asking and how many of that server's items have arrived, with a progress bar.
+
 Each check lists every item in the libraries that cover your folders, so on very large libraries you may want a longer interval, e.g. 30–60 minutes.
 
 ## Manual scans
