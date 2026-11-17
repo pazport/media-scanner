@@ -157,8 +157,16 @@
       <h3>Folders to check</h3>
       <div id="lc-paths"></div>
       <div class="grid" style="margin-top:12px">
-        <div><label>Check every (minutes)</label><input type="number" id="lc-interval" min="1">
-          <p class="hint">Each check lists every item in the matching libraries, so very large libraries may prefer 30–60.</p></div>
+        <div><label>Compare with media servers every (minutes)</label><input type="number" id="lc-server-interval" min="1">
+          <p class="hint">Asks each server only for items changed since the last comparison, and compares them with
+            the files found by the last folder read.</p></div>
+        <div><label>Re-read folders every (minutes)</label><input type="number" id="lc-interval" min="1">
+          <p class="hint">Unchanged folders are taken from a cache, so a re-read mostly just checks each folder's
+            modified time.</p></div>
+        <div><label>Full check every (hours)</label><input type="number" id="lc-full" min="1">
+          <p class="hint">Throws the caches away: reads every folder and fetches each server's whole list. Catches
+            what the caches can miss, e.g. on mergerfs a folder's modified time may not change when a file lands
+            on another drive.</p></div>
         <div><label>Ignore files newer than (minutes)</label><input type="number" id="lc-minage" min="0">
           <p class="hint">Skips files that may still be copying or importing.</p></div>
         <div><label>Re-scan the same folder after (minutes)</label><input type="number" id="lc-cooldown" min="1">
@@ -190,7 +198,8 @@
     </div>
     <div class="card">
       <div class="row" style="margin-bottom:8px"><h2 style="margin:0;flex:1">Last check</h2>
-        <button class="btn" id="lc-run">Run check now</button></div>
+        <button class="btn" id="lc-run">Run check now</button>
+        <button class="btn" id="lc-run-full" title="Ignore the caches: read every folder and fetch each server's whole list">Full check</button></div>
       <div id="lc-status" class="muted">No check has run yet.</div>
     </div>
   </section>
@@ -424,6 +433,8 @@ function renderCheck() {
   const lc = cfg.library_check;
   $('#lc-enabled').checked = lc.enabled;
   $('#lc-interval').value = lc.interval_minutes;
+  $('#lc-server-interval').value = lc.server_interval_minutes;
+  $('#lc-full').value = lc.full_refresh_hours;
   $('#lc-minage').value = lc.min_age_minutes;
   $('#lc-cooldown').value = lc.cooldown_minutes;
   $('#lc-ext').value = lc.extensions.join(', ');
@@ -462,6 +473,8 @@ function renderCheck() {
 }
 $('#lc-enabled').onchange = e => { cfg.library_check.enabled = e.target.checked; setDirty(); };
 $('#lc-interval').oninput = e => { cfg.library_check.interval_minutes = parseInt(e.target.value) || 0; setDirty(); };
+$('#lc-server-interval').oninput = e => { cfg.library_check.server_interval_minutes = parseInt(e.target.value) || 0; setDirty(); };
+$('#lc-full').oninput = e => { cfg.library_check.full_refresh_hours = parseInt(e.target.value) || 0; setDirty(); };
 $('#lc-minage').oninput = e => { cfg.library_check.min_age_minutes = parseInt(e.target.value) || 0; setDirty(); };
 $('#lc-cooldown').oninput = e => { cfg.library_check.cooldown_minutes = parseInt(e.target.value) || 0; setDirty(); };
 $('#lc-ext').oninput = e => { cfg.library_check.extensions = csv(e.target.value); setDirty(); };
@@ -469,11 +482,16 @@ $('#lc-ignore-dirs').oninput = e => { cfg.library_check.ignore_folders = csv(e.t
 $('#lc-ignore-suffix').oninput = e => { cfg.library_check.ignore_suffixes = csv(e.target.value); setDirty(); };
 $('#lc-follow').onchange = e => { cfg.library_check.ignore_symlinks = !e.target.checked; setDirty(); };
 $('#lc-workers').oninput = e => { cfg.library_check.scan_workers = parseInt(e.target.value) || 0; setDirty(); };
-$('#lc-run').onclick = async () => {
+async function runCheck(full) {
   if (dirty) { toast('Save your changes first.', false); return; }
-  try { await api('POST', '/api/check/run'); toast('Library check started.'); setTimeout(refreshCheck, 300); }
-  catch (e) { toast(e.message, false); }
-};
+  try {
+    await api('POST', '/api/check/run' + (full ? '?full=1' : ''));
+    toast(full ? 'Full check started (caches ignored).' : 'Library check started.');
+    setTimeout(refreshCheck, 300);
+  } catch (e) { toast(e.message, false); }
+}
+$('#lc-run').onclick = () => runCheck(false);
+$('#lc-run-full').onclick = () => runCheck(true);
 const folderList = (dirs, label) => !dirs.length ? '' :
   `<details style="margin-top:6px"><summary style="cursor:pointer">${dirs.length} ${label}</summary>
    <ul class="path" style="margin:6px 0 0;padding-left:18px">${dirs.map(d => `<li>${esc(d)}</li>`).join('')}</ul></details>`;
@@ -486,17 +504,21 @@ function renderProgress(p) {
   const elapsed = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
   const steps = p.servers ? 1 + p.servers : null;
   const out = [`<p><b>Checking now…</b> <span class="muted">(${elapsed})</span></p>`];
-  const filesLine = `Found <b>${num(p.files)}</b> media files in ${num(p.folders)} folders`;
+  const cached = p.cached ? ` (${num(p.cached)} unchanged, from the cache)` : '';
+  const filesLine = `Found <b>${num(p.files)}</b> media files in ${num(p.folders)} folders${cached}`;
   if (p.step === 'files') {
-    const rate = secs >= 3 ? ` (about ${num(Math.round(p.folders / secs))} folders a second)` : '';
-    out.push(`<p class="prog-step">Step 1: looking for media files. ${filesLine} so far${rate}.</p>`, bar(0, 0));
+    const rate = secs >= 3 ? ` About ${num(Math.round(p.folders / secs))} folders a second.` : '';
+    out.push(`<p class="prog-step">Step 1: looking for media files. ${filesLine} so far.${rate}</p>`, bar(0, 0));
     if (p.current) out.push(`<p class="prog-current" title="${esc(p.current)}">${esc(p.current)}</p>`);
   } else {
-    out.push(`<p class="prog-step done">Step 1 of ${steps}: ${filesLine}. ✓</p>`);
+    out.push(p.walk
+      ? `<p class="prog-step done">Step 1 of ${steps}: ${filesLine}. ✓</p>`
+      : `<p class="prog-step done">Step 1 of ${steps}: using the ${num(p.files)} media files from the last folder read. ✓</p>`);
     const lib = p.current ? ` library <b>${esc(p.current)}</b>` : '';
-    const count = p.total > 0 ? `${num(p.items)} of ${num(p.total)} items` : `${num(p.items)} items`;
+    const what = p.changes ? 'changed items' : 'items';
+    const count = p.total > 0 ? `${num(p.items)} of ${num(p.total)} ${what}` : `${num(p.items)} ${what}`;
     out.push(`<p class="prog-step">Step ${1 + p.index} of ${steps}: asking <span class="badge ${p.type}">${p.type}</span> ${esc(p.server)}
-      (server ${p.index} of ${p.servers})${lib}: ${count} received.</p>`, bar(p.items, p.total));
+      (server ${p.index} of ${p.servers})${lib}${p.changes ? ' for changes since the last check' : ''}: ${count} received.</p>`, bar(p.items, p.total));
   }
   return out.join('');
 }
@@ -515,11 +537,15 @@ async function refreshCheck() {
     const s = await api('GET', '/api/check');
     const parts = [];
     if (s.running && s.progress) parts.push(renderProgress(s.progress));
-    if (s.enabled && s.next && !s.running) parts.push(`<p>Next check: ${fmtTime(s.next)}</p>`);
+    if (s.enabled && s.next_compare && !s.running) parts.push(`<p>Next comparison with the media servers: ${fmtTime(s.next_compare)}.
+      Next folder re-read: ${fmtTime(s.next_walk)}.${s.full_at ? ` Caches last rebuilt ${fmtTime(s.full_at)}.` : ''}</p>`);
     if (!s.enabled && !s.running) parts.push('<p>The library check is turned off. Tick <b>Enabled</b> and save to run it on a schedule.</p>');
     const r = s.last;
     if (r) {
-      parts.push(`<p>${s.running ? 'Previous' : 'Last'} run ${fmtTime(r.started)}, took ${esc(r.duration)}. Found <b>${num(r.files)}</b> media files in ${num(r.folders)} folders.</p>`);
+      const disk = r.walked
+        ? `Read ${num(r.folders)} folders${r.cached ? ` (${num(r.cached)} unchanged, from the cache)` : ''} and found <b>${num(r.files)}</b> media files.`
+        : `Compared the <b>${num(r.files)}</b> media files from the folder read at ${fmtTime(r.walked_at)}.`;
+      parts.push(`<p>${s.running ? 'Previous' : 'Last'} run ${fmtTime(r.started)}, took ${esc(r.duration)}. ${disk}</p>`);
       if (r.recent) parts.push(`<p class="muted">${num(r.recent)} missing file(s) changed in the last
         ${num(cfg.library_check.min_age_minutes)} minutes were left for the next check, in case they're still being copied.</p>`);
       if (r.broken_links) parts.push(`<p class="test-result err">Skipped ${num(r.broken_links)} broken symlink(s): their targets
@@ -531,6 +557,8 @@ async function refreshCheck() {
           <td>${t.error ? '–' : num(t.known)}</td><td>${t.error ? '–' : num(t.missing)}</td>
           <td>${t.error ? `<span class="test-result err">${esc(t.error)}</span>` :
             (!t.missing ? '<span class="badge ok">all found</span>' : '') +
+            `<div class="hint">${t.full ? 'Fetched the whole list.'
+              : `Fetched ${num(t.fetched)} changed item(s); whole list last fetched ${fmtTime(t.full_at)}.`}</div>` +
             folderList(t.queued, 'folder(s) sent for scanning') + folderList(t.waiting, 'folder(s) still missing, waiting before re-scanning')}</td></tr>`).join('')
           : '<tr><td colspan="4" class="empty">No media servers selected.</td></tr>') + '</tbody></table></div>');
     }

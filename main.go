@@ -129,7 +129,7 @@ func (a *App) routes() http.Handler {
 			writeJSON(w, 400, map[string]string{"error": "add at least one folder to check first"})
 			return
 		}
-		go a.checker.Run()
+		go a.checker.Run(r.URL.Query().Get("full") == "1")
 		writeJSON(w, 200, map[string]string{"status": "started"})
 	})
 

@@ -66,6 +66,13 @@ type LibraryCheck struct {
 	IgnoreSuffixes []string `json:"ignore_suffixes"`
 	// Don't follow symlinked files and folders (they are followed by default).
 	IgnoreSymlinks bool `json:"ignore_symlinks"`
+	// How often each media server is compared with the files from the last
+	// folder walk. Only items changed since the last comparison are requested.
+	ServerIntervalMinutes int `json:"server_interval_minutes"`
+	// How often every cache is thrown away: all folders are read again and each
+	// server's whole list is fetched. Catches what the caches can miss, e.g. a
+	// mergerfs folder whose modified time doesn't change, or a server deletion.
+	FullRefreshHours int `json:"full_refresh_hours"`
 	// How many folders are read at the same time. Higher is faster on network,
 	// union and FUSE filesystems; lower is gentler on a single spinning disk.
 	Workers int `json:"scan_workers"`
@@ -302,6 +309,12 @@ func (lc *LibraryCheck) normalize() {
 	}
 	if lc.CooldownMinutes <= 0 {
 		lc.CooldownMinutes = 360
+	}
+	if lc.ServerIntervalMinutes <= 0 {
+		lc.ServerIntervalMinutes = 5
+	}
+	if lc.FullRefreshHours <= 0 {
+		lc.FullRefreshHours = 6
 	}
 	if lc.Workers <= 0 {
 		lc.Workers = 8
