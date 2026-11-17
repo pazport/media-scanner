@@ -6,12 +6,14 @@ import (
 	"io/fs"
 	"log"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -28,11 +30,16 @@ type TargetCheck struct {
 
 // CheckResult describes one library check run.
 type CheckResult struct {
-	Started  time.Time     `json:"started"`
-	Duration string        `json:"duration"`
-	Files    int           `json:"files"` // media files found on disk
-	Errors   []string      `json:"errors"`
-	Targets  []TargetCheck `json:"targets"`
+	Started  time.Time `json:"started"`
+	Duration string    `json:"duration"`
+	Files    int       `json:"files"`   // media files found on disk
+	Folders  int       `json:"folders"` // folders looked through
+	Errors   []string  `json:"errors"`
+	// Symlinks whose target couldn't be found, usually because it isn't
+	// mounted into this container.
+	BrokenLinks  int           `json:"broken_links"`
+	BrokenSample []string      `json:"broken_sample"`
+	Targets      []TargetCheck `json:"targets"`
 }
 
 // CheckProgress describes a check that is running, for the web UI.
@@ -126,7 +133,7 @@ func (c *Checker) Run() bool {
 func (c *Checker) check(cfg *Config) *CheckResult {
 	lc := cfg.LibraryCheck
 	start := time.Now()
-	res := &CheckResult{Started: start, Errors: []string{}, Targets: []TargetCheck{}}
+	res := &CheckResult{Started: start, Errors: []string{}, Targets: []TargetCheck{}, BrokenSample: []string{}}
 	defer func() { res.Duration = time.Since(start).Round(time.Millisecond).String() }()
 
 	if len(lc.Paths) == 0 {
@@ -136,11 +143,14 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 
 	// Files on disk, already rewritten into the shared path form the queue expects
 	// (library check rewrites, then global rewrites).
-	files, walkErrs := findMedia(lc, time.Now(), func(folders, files int, current string) {
+	walked := findMedia(lc, time.Now(), func(folders, files int, current string) {
 		c.update(func(p *CheckProgress) { p.Folders, p.Files, p.Current = folders, files, current })
 	})
-	res.Errors = append(res.Errors, walkErrs...)
+	files := walked.Files
+	res.Errors = append(res.Errors, walked.Errors...)
 	res.Files = len(files)
+	res.Folders = walked.Folders
+	res.BrokenLinks, res.BrokenSample = walked.Broken, walked.BrokenSample
 	canon := make([]string, len(files))
 	for i, f := range files {
 		canon[i] = applyRewrites(applyRewrites(f, lc.Rewrites), cfg.Rewrites)
@@ -238,69 +248,167 @@ func (c *Checker) update(f func(*CheckProgress)) {
 	c.mu.Unlock()
 }
 
+// walkResult is what findMedia found on disk.
+type walkResult struct {
+	Files        []string
+	Errors       []string
+	Folders      int
+	Broken       int      // symlinks whose target doesn't exist (inside this container)
+	BrokenSample []string // a few of them, to show in the UI
+}
+
+const brokenSampleSize = 10
+
 // findMedia walks the configured folders and returns media file paths.
+// Symlinked files and folders are followed unless lc.IgnoreSymlinks is set;
+// paths are reported as the link path, which is what the media servers see.
 // progress, if not nil, is called for every folder with the running totals.
-func findMedia(lc LibraryCheck, now time.Time, progress func(folders, files int, current string)) ([]string, []string) {
-	exts := map[string]bool{}
+func findMedia(lc LibraryCheck, now time.Time, progress func(folders, files int, current string)) walkResult {
+	w := &walker{
+		lc:         lc,
+		now:        now,
+		minAge:     time.Duration(lc.MinAgeMinutes) * time.Minute,
+		exts:       map[string]bool{},
+		ignoreDirs: map[string]bool{},
+		visited:    map[string]bool{},
+		progress:   progress,
+		res:        walkResult{Files: []string{}, Errors: []string{}, BrokenSample: []string{}},
+	}
 	for _, e := range lc.Extensions {
-		exts[e] = true
+		w.exts[e] = true
 	}
-	ignoreDirs := map[string]bool{}
 	for _, d := range lc.IgnoreFolders {
-		ignoreDirs[strings.ToLower(strings.TrimSpace(d))] = true
+		w.ignoreDirs[strings.ToLower(strings.TrimSpace(d))] = true
 	}
-	minAge := time.Duration(lc.MinAgeMinutes) * time.Minute
-	var files, errs []string
-	folders := 0
 	for _, root := range lc.Paths {
-		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				if p == root {
-					return err
-				}
-				return nil // unreadable subfolder: skip it
-			}
-			name := d.Name()
-			if d.IsDir() {
-				if p != root && (strings.HasPrefix(name, ".") || ignoreDirs[strings.ToLower(name)]) {
-					return filepath.SkipDir
-				}
-				folders++
-				if progress != nil {
-					progress(folders, len(files), filepath.ToSlash(p))
-				}
-				return nil
-			}
-			if strings.HasPrefix(name, ".") || !d.Type().IsRegular() {
-				return nil
-			}
-			ext := strings.ToLower(filepath.Ext(name))
-			if !exts[ext] {
-				return nil
-			}
-			base := strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name)))
-			for _, s := range lc.IgnoreSuffixes {
-				if s = strings.ToLower(strings.TrimSpace(s)); s != "" && strings.HasSuffix(base, s) {
-					return nil
-				}
-			}
-			if minAge > 0 {
-				info, err := d.Info()
-				if err != nil || now.Sub(info.ModTime()) < minAge {
-					return nil
-				}
-			}
-			files = append(files, filepath.ToSlash(p))
-			return nil
-		})
+		info, err := os.Stat(root) // follows a symlinked root
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", root, err))
+			w.res.Errors = append(w.res.Errors, fmt.Sprintf("%s: %v", root, err))
+			continue
 		}
+		if !info.IsDir() {
+			w.res.Errors = append(w.res.Errors, fmt.Sprintf("%s: not a folder", root))
+			continue
+		}
+		w.walk(root, info, true)
 	}
 	if progress != nil {
-		progress(folders, len(files), "")
+		progress(w.res.Folders, len(w.res.Files), "")
 	}
-	return files, errs
+	return w.res
+}
+
+type walker struct {
+	lc         LibraryCheck
+	now        time.Time
+	minAge     time.Duration
+	exts       map[string]bool
+	ignoreDirs map[string]bool
+	visited    map[string]bool // real folders already walked, so symlink loops end
+	progress   func(folders, files int, current string)
+	res        walkResult
+}
+
+// dirKey identifies a folder on disk regardless of the path used to reach it.
+func dirKey(p string, info fs.FileInfo) string {
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		return fmt.Sprintf("%d:%d", st.Dev, st.Ino)
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real
+	}
+	return p
+}
+
+func (w *walker) walk(dir string, info fs.FileInfo, isRoot bool) {
+	key := dirKey(dir, info)
+	if w.visited[key] {
+		return
+	}
+	w.visited[key] = true
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if isRoot {
+			w.res.Errors = append(w.res.Errors, fmt.Sprintf("%s: %v", dir, err))
+		}
+		return // unreadable subfolder: skip it
+	}
+	w.res.Folders++
+	if w.progress != nil {
+		w.progress(w.res.Folders, len(w.res.Files), filepath.ToSlash(dir))
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		p := filepath.Join(dir, name)
+		typ := e.Type()
+
+		if typ&fs.ModeSymlink != 0 {
+			if w.lc.IgnoreSymlinks {
+				continue
+			}
+			target, err := os.Stat(p)
+			if err != nil {
+				w.res.Broken++
+				if len(w.res.BrokenSample) < brokenSampleSize {
+					w.res.BrokenSample = append(w.res.BrokenSample, filepath.ToSlash(p))
+				}
+				continue
+			}
+			if target.IsDir() {
+				if !w.ignoreDirs[strings.ToLower(name)] {
+					w.walk(p, target, false)
+				}
+			} else if target.Mode().IsRegular() {
+				w.file(p, name, target)
+			}
+			continue
+		}
+
+		if e.IsDir() {
+			if w.ignoreDirs[strings.ToLower(name)] {
+				continue
+			}
+			info, err := e.Info()
+			if err == nil {
+				w.walk(p, info, false)
+			}
+			continue
+		}
+		if typ.IsRegular() {
+			w.file(p, name, nil)
+		}
+	}
+}
+
+// file adds p if it is a media file that passes the filters. info may be nil
+// (it is only fetched when the minimum age needs it).
+func (w *walker) file(p, name string, info fs.FileInfo) {
+	ext := strings.ToLower(filepath.Ext(name))
+	if !w.exts[ext] {
+		return
+	}
+	base := strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name)))
+	for _, s := range w.lc.IgnoreSuffixes {
+		if s = strings.ToLower(strings.TrimSpace(s)); s != "" && strings.HasSuffix(base, s) {
+			return
+		}
+	}
+	if w.minAge > 0 {
+		if info == nil {
+			var err error
+			if info, err = os.Stat(p); err != nil {
+				return
+			}
+		}
+		if w.now.Sub(info.ModTime()) < w.minAge {
+			return
+		}
+	}
+	w.res.Files = append(w.res.Files, filepath.ToSlash(p))
 }
 
 // normPath makes paths from different systems comparable: forward slashes,

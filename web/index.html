@@ -180,6 +180,9 @@
           <div><label>Ignore file names ending in (comma separated)</label><input id="lc-ignore-suffix">
             <p class="hint">Matched before the extension, e.g. <code>-trailer</code>.</p></div>
         </div>
+        <label class="chip" style="margin-top:12px;width:fit-content"><input type="checkbox" id="lc-follow"> Follow symlinks</label>
+        <p class="hint">Counts symlinked files and walks into symlinked folders. A link's target must also be mounted
+          into this container, or it shows up as a broken link.</p>
       </details>
     </div>
     <div class="card">
@@ -423,6 +426,7 @@ function renderCheck() {
   $('#lc-ext').value = lc.extensions.join(', ');
   $('#lc-ignore-dirs').value = lc.ignore_folders.join(', ');
   $('#lc-ignore-suffix').value = lc.ignore_suffixes.join(', ');
+  $('#lc-follow').checked = !lc.ignore_symlinks;
   // folder list
   const box = $('#lc-paths'); box.innerHTML = '';
   lc.paths.forEach((p, i) => {
@@ -459,6 +463,7 @@ $('#lc-cooldown').oninput = e => { cfg.library_check.cooldown_minutes = parseInt
 $('#lc-ext').oninput = e => { cfg.library_check.extensions = csv(e.target.value); setDirty(); };
 $('#lc-ignore-dirs').oninput = e => { cfg.library_check.ignore_folders = csv(e.target.value); setDirty(); };
 $('#lc-ignore-suffix').oninput = e => { cfg.library_check.ignore_suffixes = csv(e.target.value); setDirty(); };
+$('#lc-follow').onchange = e => { cfg.library_check.ignore_symlinks = !e.target.checked; setDirty(); };
 $('#lc-run').onclick = async () => {
   if (dirty) { toast('Save your changes first.', false); return; }
   try { await api('POST', '/api/check/run'); toast('Library check started.'); setTimeout(refreshCheck, 300); }
@@ -489,6 +494,16 @@ function renderProgress(p) {
   }
   return out.join('');
 }
+// Update the status without closing any list the user has expanded.
+let lastStatus = '';
+function setStatus(html) {
+  if (html === lastStatus) return;
+  lastStatus = html;
+  const box = $('#lc-status');
+  const open = [...box.querySelectorAll('details')].map(d => d.open);
+  box.innerHTML = html;
+  box.querySelectorAll('details').forEach((d, i) => { if (open[i]) d.open = true; });
+}
 async function refreshCheck() {
   try {
     const s = await api('GET', '/api/check');
@@ -498,7 +513,10 @@ async function refreshCheck() {
     if (!s.enabled && !s.running) parts.push('<p>The library check is turned off. Tick <b>Enabled</b> and save to run it on a schedule.</p>');
     const r = s.last;
     if (r) {
-      parts.push(`<p>${s.running ? 'Previous' : 'Last'} run ${fmtTime(r.started)}, took ${esc(r.duration)}. Found <b>${num(r.files)}</b> media files on disk.</p>`);
+      parts.push(`<p>${s.running ? 'Previous' : 'Last'} run ${fmtTime(r.started)}, took ${esc(r.duration)}. Found <b>${num(r.files)}</b> media files in ${num(r.folders)} folders.</p>`);
+      if (r.broken_links) parts.push(`<p class="test-result err">Skipped ${num(r.broken_links)} broken symlink(s): their targets
+        can't be found inside this container. Mount the folders the links point to, at the same paths.</p>` +
+        folderList(r.broken_sample, r.broken_links > r.broken_sample.length ? 'examples' : 'link(s)'));
       r.errors.forEach(e => parts.push(`<p class="test-result err">${esc(e)}</p>`));
       parts.push(`<div class="table-wrap"><table><thead><tr><th>Server</th><th>Files on server</th><th>Missing</th><th>Details</th></tr></thead><tbody>` +
         (r.targets.length ? r.targets.map(t => `<tr><td><span class="badge ${t.type}">${t.type}</span> ${esc(t.target)}</td>
@@ -508,7 +526,7 @@ async function refreshCheck() {
             folderList(t.queued, 'folder(s) sent for scanning') + folderList(t.waiting, 'folder(s) still missing, waiting before re-scanning')}</td></tr>`).join('')
           : '<tr><td colspan="4" class="empty">No media servers selected.</td></tr>') + '</tbody></table></div>');
     }
-    $('#lc-status').innerHTML = parts.join('') || 'No check has run yet.';
+    setStatus(parts.join('') || 'No check has run yet.');
   } catch (e) { /* server restarting */ }
 }
 

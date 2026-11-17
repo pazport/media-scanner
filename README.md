@@ -145,6 +145,7 @@ Set it up on the **Library Check** tab:
 - **Path rewrites:** media paths are rewritten exactly like webhook paths (library check rewrites, then global, then server-type, then per-server). If webhooks already scan the right place, the check usually needs no extra rewrites.
 - **Ignore files newer than:** skips files changed in the last few minutes, which may still be copying (default 10).
 - **Re-scan the same folder after:** once a scan has been requested for a folder, it isn't requested again until this time has passed, even if the file is still missing (default 360 minutes). Without this, a file the server can't import would be re-scanned every check.
+- **Symlinks:** symlinked files and folders are followed (turn off under **Advanced → Follow symlinks**). A link's target must be mounted into the container too, at the same path the link points to; links whose target can't be found are counted and listed as broken in the status, so you can see what's not mounted.
 - **Advanced:** which extensions count as media, and which extras folders (`Featurettes`, `Trailers`, …) and file name endings (`-trailer`, `-sample`, …) are skipped. Servers don't list extras as normal items, so they would otherwise always look missing.
 
 The status area shows when the last check ran, how many files each server knows, and which folders were sent for scanning or are waiting to be re-scanned. **Run check now** starts one straight away.
