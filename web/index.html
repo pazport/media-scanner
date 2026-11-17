@@ -87,6 +87,7 @@
     <button data-tab="dashboard" class="active">Dashboard</button>
     <button data-tab="targets">Media Servers</button>
     <button data-tab="triggers">Triggers</button>
+    <button data-tab="check">Library Check</button>
     <button data-tab="settings">Settings</button>
   </nav>
   <div class="spacer"></div>
@@ -134,6 +135,49 @@
   <!-- Triggers -->
   <section id="triggers">
     <div id="trigger-list"></div>
+  </section>
+
+  <!-- Library check -->
+  <section id="check">
+    <div class="card">
+      <div class="row" style="margin-bottom:8px"><h2 style="margin:0;flex:1">Library check</h2>
+        <label class="chip"><input type="checkbox" id="lc-enabled"> Enabled</label></div>
+      <p class="hint" style="margin-bottom:12px">Every few minutes, lists the media files in the folders below and asks each
+        media server which files it already has. Any folder with a file the server is missing gets a scan, using the same
+        queue and path rewrites as the webhooks. The folders must be mounted into this container.</p>
+      <h3>Folders to check</h3>
+      <div id="lc-paths"></div>
+      <div class="grid" style="margin-top:12px">
+        <div><label>Check every (minutes)</label><input type="number" id="lc-interval" min="1">
+          <p class="hint">Each check lists every item in the matching libraries, so very large libraries may prefer 30–60.</p></div>
+        <div><label>Ignore files newer than (minutes)</label><input type="number" id="lc-minage" min="0">
+          <p class="hint">Skips files that may still be copying or importing.</p></div>
+        <div><label>Re-scan the same folder after (minutes)</label><input type="number" id="lc-cooldown" min="1">
+          <p class="hint">If a file is still missing after a scan, wait this long before asking again.</p></div>
+      </div>
+      <h3>Check these media servers</h3>
+      <div class="chips" id="lc-targets"></div>
+      <h3>Path rewrites for the library check</h3>
+      <p class="hint" style="margin-bottom:8px">Applied before the global, server-type and per-server rewrites, like a trigger's rewrites.</p>
+      <div id="lc-rw"></div>
+    </div>
+    <div class="card">
+      <details>
+        <summary style="cursor:pointer"><b>Advanced: which files count</b></summary>
+        <div class="grid" style="margin-top:12px">
+          <div><label>Media file extensions (comma separated)</label><input id="lc-ext"></div>
+          <div><label>Ignore folders named (comma separated)</label><input id="lc-ignore-dirs">
+            <p class="hint">Extras folders that servers don't list as normal items.</p></div>
+          <div><label>Ignore file names ending in (comma separated)</label><input id="lc-ignore-suffix">
+            <p class="hint">Matched before the extension, e.g. <code>-trailer</code>.</p></div>
+        </div>
+      </details>
+    </div>
+    <div class="card">
+      <div class="row" style="margin-bottom:8px"><h2 style="margin:0;flex:1">Last check</h2>
+        <button class="btn" id="lc-run">Run check now</button></div>
+      <div id="lc-status" class="muted">No check has run yet.</div>
+    </div>
   </section>
 
   <!-- Settings -->
@@ -258,13 +302,14 @@ function renderTargets() {
       t[inp.dataset.f] = inp.type === 'checkbox' ? inp.checked : inp.value;
       if (inp.dataset.f === 'name') el.querySelector('strong').textContent = inp.value;
       setDirty();
-      if (inp.dataset.f === 'name') renderTriggers();
+      if (inp.dataset.f === 'name') { renderTriggers(); renderCheck(); }
     });
     el.querySelector('[data-act=del]').onclick = () => {
       if (!confirm(`Delete ${t.name}?`)) return;
       cfg.targets.splice(i, 1);
       Object.values(cfg.triggers).forEach(tr => tr.targets = tr.targets.filter(id => id !== t.id));
-      setDirty(); renderTargets(); renderTriggers();
+      cfg.library_check.targets = cfg.library_check.targets.filter(id => id !== t.id);
+      setDirty(); renderTargets(); renderTriggers(); renderCheck();
     };
     el.querySelector('[data-act=test]').onclick = async () => {
       const out = el.querySelector('.test-result'); out.className = 'test-result'; out.textContent = 'Testing…';
@@ -282,7 +327,7 @@ document.querySelectorAll('[data-add]').forEach(b => b.onclick = () => {
   const id = Math.random().toString(16).slice(2, 14);
   cfg.targets.push({ id, type, name: type[0].toUpperCase() + type.slice(1), url: PLACEHOLDER[type],
                      token: '', enabled: true, rewrites: [] });
-  setDirty(); renderTargets(); renderTriggers();
+  setDirty(); renderTargets(); renderTriggers(); renderCheck();
 });
 
 // ---------- triggers ----------
@@ -330,6 +375,9 @@ function prepareForSave(c) {
   copy.rewrites = copy.rewrites.filter(r => r.from);
   for (const k of Object.keys(copy.type_rewrites)) copy.type_rewrites[k] = copy.type_rewrites[k].filter(r => r.from);
   copy.targets.forEach(t => t.rewrites = t.rewrites.filter(r => r.from));
+  const lc = copy.library_check;
+  lc.rewrites = lc.rewrites.filter(r => r.from);
+  lc.paths = lc.paths.map(p => p.trim()).filter(Boolean);
   return copy;
 }
 
@@ -355,7 +403,85 @@ $('#save').onclick = async () => {
 };
 window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
 
-function renderAll() { renderTargets(); renderTriggers(); renderSettings(); }
+// ---------- library check ----------
+const csv = s => s.split(',').map(x => x.trim()).filter(Boolean);
+function renderCheck() {
+  const lc = cfg.library_check;
+  $('#lc-enabled').checked = lc.enabled;
+  $('#lc-interval').value = lc.interval_minutes;
+  $('#lc-minage').value = lc.min_age_minutes;
+  $('#lc-cooldown').value = lc.cooldown_minutes;
+  $('#lc-ext').value = lc.extensions.join(', ');
+  $('#lc-ignore-dirs').value = lc.ignore_folders.join(', ');
+  $('#lc-ignore-suffix').value = lc.ignore_suffixes.join(', ');
+  // folder list
+  const box = $('#lc-paths'); box.innerHTML = '';
+  lc.paths.forEach((p, i) => {
+    const row = document.createElement('div'); row.className = 'row'; row.style.marginBottom = '6px';
+    row.innerHTML = `<input placeholder="/data/media/movies" value="${esc(p)}" style="flex:1;min-width:200px">
+      <button class="btn small danger">✕</button>`;
+    row.querySelector('input').oninput = e => { lc.paths[i] = e.target.value; setDirty(); };
+    row.querySelector('button').onclick = () => { lc.paths.splice(i, 1); setDirty(); renderCheck(); };
+    box.appendChild(row);
+  });
+  const add = document.createElement('button'); add.className = 'btn small'; add.textContent = '+ Add folder';
+  add.onclick = () => { lc.paths.push(''); setDirty(); renderCheck(); };
+  box.appendChild(add);
+  // servers
+  const all = lc.all_targets;
+  $('#lc-targets').innerHTML = `<label class="chip"><input type="checkbox" class="all" ${all ? 'checked' : ''}> All media servers</label>` +
+    cfg.targets.map(t => `<label class="chip"><input type="checkbox" class="tg" value="${t.id}"
+      ${all || lc.targets.includes(t.id) ? 'checked' : ''} ${all ? 'disabled' : ''}>
+      <span class="badge ${t.type}">${t.type}</span> ${esc(t.name)}</label>`).join('');
+  $('#lc-targets .all').onchange = e => {
+    lc.all_targets = e.target.checked;
+    if (!lc.all_targets && !lc.targets.length) lc.targets = cfg.targets.map(t => t.id);
+    setDirty(); renderCheck();
+  };
+  document.querySelectorAll('#lc-targets .tg').forEach(cb => cb.onchange = () => {
+    lc.targets = [...document.querySelectorAll('#lc-targets .tg:checked')].map(x => x.value); setDirty();
+  });
+  rewriteEditor($('#lc-rw'), lc.rewrites);
+}
+$('#lc-enabled').onchange = e => { cfg.library_check.enabled = e.target.checked; setDirty(); };
+$('#lc-interval').oninput = e => { cfg.library_check.interval_minutes = parseInt(e.target.value) || 0; setDirty(); };
+$('#lc-minage').oninput = e => { cfg.library_check.min_age_minutes = parseInt(e.target.value) || 0; setDirty(); };
+$('#lc-cooldown').oninput = e => { cfg.library_check.cooldown_minutes = parseInt(e.target.value) || 0; setDirty(); };
+$('#lc-ext').oninput = e => { cfg.library_check.extensions = csv(e.target.value); setDirty(); };
+$('#lc-ignore-dirs').oninput = e => { cfg.library_check.ignore_folders = csv(e.target.value); setDirty(); };
+$('#lc-ignore-suffix').oninput = e => { cfg.library_check.ignore_suffixes = csv(e.target.value); setDirty(); };
+$('#lc-run').onclick = async () => {
+  if (dirty) { toast('Save your changes first.', false); return; }
+  try { await api('POST', '/api/check/run'); toast('Library check started.'); setTimeout(refreshCheck, 1000); }
+  catch (e) { toast(e.message, false); }
+};
+const folderList = (dirs, label) => !dirs.length ? '' :
+  `<details style="margin-top:6px"><summary style="cursor:pointer">${dirs.length} ${label}</summary>
+   <ul class="path" style="margin:6px 0 0;padding-left:18px">${dirs.map(d => `<li>${esc(d)}</li>`).join('')}</ul></details>`;
+async function refreshCheck() {
+  try {
+    const s = await api('GET', '/api/check');
+    const parts = [];
+    if (s.running) parts.push('<p><b>Checking now…</b></p>');
+    if (s.enabled && s.next && !s.running) parts.push(`<p>Next check: ${fmtTime(s.next)}</p>`);
+    if (!s.enabled) parts.push('<p>The library check is turned off. Tick <b>Enabled</b> and save to run it on a schedule.</p>');
+    const r = s.last;
+    if (r) {
+      parts.push(`<p>Last run ${fmtTime(r.started)}, took ${esc(r.duration)}. Found <b>${r.files}</b> media files on disk.</p>`);
+      r.errors.forEach(e => parts.push(`<p class="test-result err">${esc(e)}</p>`));
+      parts.push(`<div class="table-wrap"><table><thead><tr><th>Server</th><th>Files on server</th><th>Missing</th><th>Details</th></tr></thead><tbody>` +
+        (r.targets.length ? r.targets.map(t => `<tr><td><span class="badge ${t.type}">${t.type}</span> ${esc(t.target)}</td>
+          <td>${t.error ? '–' : t.known}</td><td>${t.error ? '–' : t.missing}</td>
+          <td>${t.error ? `<span class="test-result err">${esc(t.error)}</span>` :
+            (!t.missing ? '<span class="badge ok">all found</span>' : '') +
+            folderList(t.queued, 'folder(s) sent for scanning') + folderList(t.waiting, 'folder(s) still missing, waiting before re-scanning')}</td></tr>`).join('')
+          : '<tr><td colspan="4" class="empty">No media servers selected.</td></tr>') + '</tbody></table></div>');
+    }
+    $('#lc-status').innerHTML = parts.join('') || 'No check has run yet.';
+  } catch (e) { /* server restarting */ }
+}
+
+function renderAll() { renderTargets(); renderTriggers(); renderSettings(); renderCheck(); }
 
 async function load() {
   cfg = await api('GET', '/api/config');
@@ -389,8 +515,9 @@ async function refresh() {
   } catch (e) { /* server restarting */ }
 }
 
-load().then(refresh).catch(e => toast('Could not load config: ' + e.message, false));
+load().then(refresh).then(refreshCheck).catch(e => toast('Could not load config: ' + e.message, false));
 setInterval(refresh, 3000);
+setInterval(refreshCheck, 5000);
 </script>
 </body>
 </html>

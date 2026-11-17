@@ -44,6 +44,43 @@ type Auth struct {
 	Password string `json:"password"`
 }
 
+// LibraryCheck periodically compares media files on disk with what each
+// media server knows about, and requests scans for anything missing.
+type LibraryCheck struct {
+	Enabled         bool `json:"enabled"`
+	IntervalMinutes int  `json:"interval_minutes"`
+	// Folders to walk, as seen inside this container.
+	Paths []string `json:"paths"`
+	// Skip files modified more recently than this (still being copied).
+	MinAgeMinutes int `json:"min_age_minutes"`
+	// After requesting a scan for a folder, don't request it again for this long.
+	CooldownMinutes int       `json:"cooldown_minutes"`
+	AllTargets      bool      `json:"all_targets"`
+	Targets         []string  `json:"targets"`
+	Rewrites        []Rewrite `json:"rewrites"`
+	// File extensions counted as media (lower case, with the dot).
+	Extensions []string `json:"extensions"`
+	// Folder names (any level, case-insensitive) that are skipped, e.g. extras.
+	IgnoreFolders []string `json:"ignore_folders"`
+	// File name endings (before the extension, case-insensitive) that are skipped.
+	IgnoreSuffixes []string `json:"ignore_suffixes"`
+}
+
+var (
+	defaultExtensions = []string{
+		".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts", ".mpg", ".mpeg", ".webm", ".iso",
+		".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".alac", ".wma",
+	}
+	defaultIgnoreFolders = []string{
+		"extras", "featurettes", "behind the scenes", "deleted scenes", "interviews",
+		"scenes", "shorts", "trailers", "other", "sample", "samples", "@eadir",
+	}
+	defaultIgnoreSuffixes = []string{
+		"-trailer", "-sample", "-featurette", "-behindthescenes", "-deleted",
+		"-interview", "-scene", "-short", "-other", ".sample", "sample",
+	}
+)
+
 type Config struct {
 	Port      int       `json:"port"`
 	ScanDelay int       `json:"scan_delay"` // seconds to wait/batch before scanning
@@ -54,6 +91,8 @@ type Config struct {
 	TypeRewrites map[string][]Rewrite `json:"type_rewrites"`
 	Triggers     map[string]*Trigger  `json:"triggers"`
 	Targets      []Target             `json:"targets"`
+
+	LibraryCheck LibraryCheck `json:"library_check"`
 }
 
 var triggerNames = []string{"radarr", "sonarr", "lidarr", "manual"}
@@ -61,7 +100,8 @@ var triggerNames = []string{"radarr", "sonarr", "lidarr", "manual"}
 var validTypes = map[string]bool{"plex": true, "jellyfin": true, "emby": true}
 
 func defaultConfig() *Config {
-	c := &Config{Port: 3030, ScanDelay: 10, Triggers: map[string]*Trigger{}}
+	c := &Config{Port: 3030, ScanDelay: 10, Triggers: map[string]*Trigger{},
+		LibraryCheck: LibraryCheck{AllTargets: true}}
 	c.normalize()
 	return c
 }
@@ -110,6 +150,7 @@ func (c *Config) normalize() {
 	if c.Targets == nil {
 		c.Targets = []Target{}
 	}
+	c.LibraryCheck.normalize()
 	for i := range c.Targets {
 		t := &c.Targets[i]
 		if t.ID == "" {
@@ -133,6 +174,11 @@ func (c *Config) validate() error {
 	for typ := range c.TypeRewrites {
 		if !validTypes[typ] {
 			return fmt.Errorf("type_rewrites: unknown server type %q (use plex, jellyfin or emby)", typ)
+		}
+	}
+	for _, p := range c.LibraryCheck.Paths {
+		if !strings.HasPrefix(p, "/") {
+			return fmt.Errorf("library check: folder %q must be an absolute path (starting with /)", p)
 		}
 	}
 	ids := map[string]bool{}
@@ -234,4 +280,59 @@ func applyRewrites(path string, rws []Rewrite) string {
 		}
 	}
 	return path
+}
+
+func (lc *LibraryCheck) normalize() {
+	// A config without a library_check section gets the defaults.
+	fresh := lc.Paths == nil && lc.Extensions == nil
+	if fresh {
+		lc.AllTargets = true
+		lc.MinAgeMinutes = 10
+	}
+	if lc.IntervalMinutes <= 0 {
+		lc.IntervalMinutes = 10
+	}
+	if lc.MinAgeMinutes < 0 {
+		lc.MinAgeMinutes = 0
+	}
+	if lc.CooldownMinutes <= 0 {
+		lc.CooldownMinutes = 360
+	}
+	if lc.Targets == nil {
+		lc.Targets = []string{}
+	}
+	if lc.Rewrites == nil {
+		lc.Rewrites = []Rewrite{}
+	}
+	if lc.Extensions == nil {
+		lc.Extensions = append([]string{}, defaultExtensions...)
+	}
+	if lc.IgnoreFolders == nil {
+		lc.IgnoreFolders = append([]string{}, defaultIgnoreFolders...)
+	}
+	if lc.IgnoreSuffixes == nil {
+		lc.IgnoreSuffixes = append([]string{}, defaultIgnoreSuffixes...)
+	}
+	exts := []string{}
+	for _, e := range lc.Extensions {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		if !strings.HasPrefix(e, ".") {
+			e = "." + e
+		}
+		exts = append(exts, e)
+	}
+	lc.Extensions = exts
+	paths := []string{}
+	for _, p := range lc.Paths {
+		if p = strings.TrimSpace(p); p != "" {
+			if p != "/" {
+				p = strings.TrimRight(p, "/")
+			}
+			paths = append(paths, p)
+		}
+	}
+	lc.Paths = paths
 }

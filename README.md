@@ -13,6 +13,7 @@ Radarr, Sonarr and Lidarr send webhooks to Media Scanner, which asks **Plex**, *
 - Choose which media servers each trigger notifies: one, some or all of them.
 - Path rewrites (global, per trigger and per server) handle containers that mount media at different paths.
 - Repeated requests for the same folder are batched and de-duplicated, with a configurable delay.
+- An optional library check finds media on disk that a server hasn't picked up yet, and scans for it.
 - A web UI for every setting. Changes are saved to `/config/config.json`.
 - Optional basic auth for the UI and webhooks.
 - A ~10 MB `FROM scratch` Docker image (about 3 MB compressed) with no dependencies beyond the Go standard library.
@@ -127,6 +128,28 @@ Rewrites are applied in this order, and each list uses its first matching prefix
 For example, if Radarr uses `/data/media/...`, Plex sees `/media/...` and Jellyfin and Emby both see `/mnt/media/...`, add `/data/media` → `/media` under Plex and `/data/media` → `/mnt/media` under both Jellyfin and Emby.
 
 For Plex, Media Scanner finds the library whose folder contains the rewritten path and refreshes only that path. If no library matches, the dashboard shows an error, which usually means a rewrite is missing.
+
+## Library check
+
+Webhooks cover new downloads, but files can still be missed: a webhook fails, a file is copied in by hand, or a server skips a scan. The library check catches those.
+
+On a schedule (every 10 minutes by default) it:
+
+1. Lists the media files in the folders you choose.
+2. Asks each selected Plex, Jellyfin or Emby server for the files it already has.
+3. Requests a scan of every folder that has a file the server is missing. These scans use the same queue and path rewrites as the webhooks.
+
+Set it up on the **Library Check** tab:
+
+- **Folders to check:** paths as this container sees them, so mount your media into the container, e.g. `- /mnt/media:/mnt/media:ro`. Read-only is fine.
+- **Path rewrites:** media paths are rewritten exactly like webhook paths (library check rewrites, then global, then server-type, then per-server). If webhooks already scan the right place, the check usually needs no extra rewrites.
+- **Ignore files newer than:** skips files changed in the last few minutes, which may still be copying (default 10).
+- **Re-scan the same folder after:** once a scan has been requested for a folder, it isn't requested again until this time has passed, even if the file is still missing (default 360 minutes). Without this, a file the server can't import would be re-scanned every check.
+- **Advanced:** which extensions count as media, and which extras folders (`Featurettes`, `Trailers`, …) and file name endings (`-trailer`, `-sample`, …) are skipped. Servers don't list extras as normal items, so they would otherwise always look missing.
+
+The status area shows when the last check ran, how many files each server knows, and which folders were sent for scanning or are waiting to be re-scanned. **Run check now** starts one straight away.
+
+Each check lists every item in the libraries that cover your folders, so on very large libraries you may want a longer interval, e.g. 30–60 minutes.
 
 ## Manual scans
 

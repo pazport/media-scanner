@@ -19,8 +19,9 @@ var webFS embed.FS
 var version = "dev"
 
 type App struct {
-	store *Store
-	queue *Queue
+	store   *Store
+	queue   *Queue
+	checker *Checker
 }
 
 func main() {
@@ -39,8 +40,10 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	app := &App{store: store, queue: newQueue(store)}
+	queue := newQueue(store)
+	app := &App{store: store, queue: queue, checker: newChecker(store, queue)}
 	go app.queue.Run()
+	go app.checker.Loop()
 
 	cfg := store.Get()
 	addr := fmt.Sprintf(":%d", cfg.Port)
@@ -116,6 +119,18 @@ func (a *App) routes() http.Handler {
 			"history": a.queue.History(),
 			"stats":   a.queue.Stats(),
 		})
+	})
+
+	mux.HandleFunc("GET /api/check", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, a.checker.Status())
+	})
+	mux.HandleFunc("POST /api/check/run", func(w http.ResponseWriter, r *http.Request) {
+		if len(a.store.Get().LibraryCheck.Paths) == 0 {
+			writeJSON(w, 400, map[string]string{"error": "add at least one folder to check first"})
+			return
+		}
+		go a.checker.Run()
+		writeJSON(w, 200, map[string]string{"status": "started"})
 	})
 
 	sub, _ := fs.Sub(webFS, "web")
