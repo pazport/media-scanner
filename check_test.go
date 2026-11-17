@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,12 +47,12 @@ func TestFindMedia(t *testing.T) {
 	} {
 		writeFile(t, filepath.Join(root, f), old)
 	}
-	writeFile(t, filepath.Join(root, "Movie C (2024)/Movie C (2024).mkv"), time.Minute) // too new
+	writeFile(t, filepath.Join(root, "Movie C (2024)/Movie C (2024).mkv"), time.Minute) // new: age is checked later, not by the walk
 
 	lc := LibraryCheck{Paths: []string{root}}
 	lc.normalize()
 	lc.MinAgeMinutes = 10
-	walked := findMedia(lc, time.Now(), nil)
+	walked := findMedia(lc, nil)
 	files := walked.Files
 	if len(walked.Errors) > 0 {
 		t.Fatal(walked.Errors)
@@ -62,6 +63,7 @@ func TestFindMedia(t *testing.T) {
 	sort.Strings(files)
 	want := []string{
 		"Movie A (2020)/Movie A (2020).mkv",
+		"Movie C (2024)/Movie C (2024).mkv",
 		"Music/Band/Album/01 - Track.flac",
 		"Show/Season 01/Show - S01E01.MKV",
 	}
@@ -71,7 +73,7 @@ func TestFindMedia(t *testing.T) {
 
 	// A missing folder is reported, not fatal.
 	lc.Paths = []string{filepath.Join(root, "nope")}
-	if errs := findMedia(lc, time.Now(), nil).Errors; len(errs) != 1 {
+	if errs := findMedia(lc, nil).Errors; len(errs) != 1 {
 		t.Errorf("expected 1 error for missing folder, got %v", errs)
 	}
 }
@@ -101,6 +103,8 @@ func TestLibraryCheck(t *testing.T) {
 	for _, f := range files {
 		writeFile(t, filepath.Join(media, f), time.Hour)
 	}
+	// Still being copied: no server knows it, but it's newer than the minimum age.
+	writeFile(t, filepath.Join(media, "movies/Fresh (2025)/Fresh (2025).mkv"), time.Minute)
 
 	// Plex sees the media under /plex. It knows Known (2020) and S01E01.
 	var mu sync.Mutex
@@ -198,8 +202,8 @@ func TestLibraryCheck(t *testing.T) {
 		t.Fatal("check did not run")
 	}
 	res := checker.Status()["last"].(*CheckResult)
-	if res.Files != 4 || len(res.Errors) != 0 {
-		t.Fatalf("files=%d errors=%v", res.Files, res.Errors)
+	if res.Files != 5 || len(res.Errors) != 0 || res.Recent != 1 {
+		t.Fatalf("files=%d recent=%d errors=%v", res.Files, res.Recent, res.Errors)
 	}
 	byName := map[string]TargetCheck{}
 	for _, tc := range res.Targets {
@@ -292,7 +296,7 @@ func TestCheckProgress(t *testing.T) {
 	lc := LibraryCheck{Paths: []string{root}}
 	lc.normalize()
 	var lastFolders, lastFiles int
-	files := findMedia(lc, time.Now(), func(folders, files int, _ string) { lastFolders, lastFiles = folders, files }).Files
+	files := findMedia(lc, func(folders, files int, _ string) { lastFolders, lastFiles = folders, files }).Files
 	if lastFolders != 3 || lastFiles != 3 || len(files) != 3 {
 		t.Errorf("folders=%d files=%d found=%d", lastFolders, lastFiles, len(files))
 	}
@@ -385,14 +389,14 @@ func TestFindMediaSymlinks(t *testing.T) {
 	lc := LibraryCheck{Paths: []string{lib}}
 	lc.normalize()
 	lc.MinAgeMinutes = 10
-	got := findMedia(lc, time.Now(), nil)
+	got := findMedia(lc, nil)
 	rel := []string{}
 	for _, f := range got.Files {
 		r, _ := filepath.Rel(lib, f)
 		rel = append(rel, r)
 	}
 	sort.Strings(rel)
-	want := []string{"Show/Season 01/S01E01.mkv", "movies/Movie A (2020)/Movie A (2020).mkv"}
+	want := []string{"Show/Season 01/S01E01.mkv", "movies/Movie A (2020)/Movie A (2020).mkv", "new.mkv"}
 	if !reflect.DeepEqual(rel, want) {
 		t.Errorf("files: got %v want %v", rel, want)
 	}
@@ -405,7 +409,7 @@ func TestFindMediaSymlinks(t *testing.T) {
 
 	// With symlinks ignored, none of the linked media is found.
 	lc.IgnoreSymlinks = true
-	if got := findMedia(lc, time.Now(), nil); len(got.Files) != 0 || got.Broken != 0 {
+	if got := findMedia(lc, nil); len(got.Files) != 0 || got.Broken != 0 {
 		t.Errorf("ignore symlinks: files=%v broken=%d", got.Files, got.Broken)
 	}
 
@@ -414,7 +418,43 @@ func TestFindMediaSymlinks(t *testing.T) {
 	must(os.Symlink(lib, link))
 	lc.IgnoreSymlinks = false
 	lc.Paths = []string{link}
-	if got := findMedia(lc, time.Now(), nil); len(got.Files) != 2 {
+	if got := findMedia(lc, nil); len(got.Files) != 3 {
 		t.Errorf("symlinked root: %v %v", got.Files, got.Errors)
 	}
+}
+
+func TestFindMediaParallel(t *testing.T) {
+	root := t.TempDir()
+	for s := 0; s < 20; s++ {
+		for e := 0; e < 10; e++ {
+			writeFile(t, filepath.Join(root, fmt.Sprintf("Show %02d/Season %02d/E%02d.mkv", s, e, e)), time.Hour)
+		}
+	}
+	// A slow filesystem: every folder listing takes 5ms.
+	defer func(f func(string) ([]os.DirEntry, error)) { readDir = f }(readDir)
+	readDir = func(p string) ([]os.DirEntry, error) {
+		time.Sleep(5 * time.Millisecond)
+		return os.ReadDir(p)
+	}
+	lc := LibraryCheck{Paths: []string{root}}
+	lc.normalize()
+
+	run := func(workers int) (walkResult, time.Duration) {
+		lc.Workers = workers
+		start := time.Now()
+		res := findMedia(lc, nil)
+		return res, time.Since(start)
+	}
+	one, slow := run(1)
+	many, fast := run(8)
+	if len(one.Files) != 200 || one.Folders != 221 {
+		t.Fatalf("1 worker: files=%d folders=%d", len(one.Files), one.Folders)
+	}
+	if !reflect.DeepEqual(one.Files, many.Files) || one.Folders != many.Folders {
+		t.Errorf("8 workers found different results: %d files, %d folders", len(many.Files), many.Folders)
+	}
+	if fast*3 > slow {
+		t.Errorf("8 workers took %s, 1 worker %s: expected at least 3x faster", fast, slow)
+	}
+	t.Logf("221 folders at 5ms each: 1 worker %s, 8 workers %s", slow.Round(time.Millisecond), fast.Round(time.Millisecond))
 }

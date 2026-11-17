@@ -66,6 +66,9 @@ type LibraryCheck struct {
 	IgnoreSuffixes []string `json:"ignore_suffixes"`
 	// Don't follow symlinked files and folders (they are followed by default).
 	IgnoreSymlinks bool `json:"ignore_symlinks"`
+	// How many folders are read at the same time. Higher is faster on network,
+	// union and FUSE filesystems; lower is gentler on a single spinning disk.
+	Workers int `json:"scan_workers"`
 }
 
 var (
@@ -299,6 +302,11 @@ func (lc *LibraryCheck) normalize() {
 	}
 	if lc.CooldownMinutes <= 0 {
 		lc.CooldownMinutes = 360
+	}
+	if lc.Workers <= 0 {
+		lc.Workers = 8
+	} else if lc.Workers > 64 {
+		lc.Workers = 64
 	}
 	if lc.Targets == nil {
 		lc.Targets = []string{}

@@ -154,6 +154,8 @@ While a check runs, the status updates every 2 seconds with its progress: how ma
 
 Each check lists every item in the libraries that cover your folders, so on very large libraries you may want a longer interval, e.g. 30–60 minutes.
 
+**Speed:** folders are read 8 at a time by default (**Advanced → Folders read at the same time**). On union filesystems like mergerfs, network shares and FUSE mounts, most of the time goes on waiting for each folder listing, so raising this to 16–32 can make the first step much faster. On a single spinning disk, 1–4 is gentler. During a check the status shows how many folders a second it's reading. File ages for **Ignore files newer than** are only looked up for files a server is missing, so the walk itself only reads folder listings.
+
 ## Manual scans
 
 Use the dashboard, or:
