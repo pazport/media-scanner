@@ -52,7 +52,7 @@ func TestFindMedia(t *testing.T) {
 	lc := LibraryCheck{Paths: []string{root}}
 	lc.normalize()
 	lc.MinAgeMinutes = 10
-	walked := findMedia(lc, nil)
+	walked := findMedia(lc, nil, nil)
 	files := walked.Files
 	if len(walked.Errors) > 0 {
 		t.Fatal(walked.Errors)
@@ -73,7 +73,7 @@ func TestFindMedia(t *testing.T) {
 
 	// A missing folder is reported, not fatal.
 	lc.Paths = []string{filepath.Join(root, "nope")}
-	if errs := findMedia(lc, nil).Errors; len(errs) != 1 {
+	if errs := findMedia(lc, nil, nil).Errors; len(errs) != 1 {
 		t.Errorf("expected 1 error for missing folder, got %v", errs)
 	}
 }
@@ -198,7 +198,7 @@ func TestLibraryCheck(t *testing.T) {
 
 	queue := newQueue(store)
 	checker := newChecker(store, queue)
-	if !checker.Run() {
+	if !checker.Run(false) {
 		t.Fatal("check did not run")
 	}
 	res := checker.Status()["last"].(*CheckResult)
@@ -256,7 +256,7 @@ func TestLibraryCheck(t *testing.T) {
 	}
 
 	// A second run inside the cooldown doesn't ask again; it reports the folders as waiting.
-	checker.Run()
+	checker.Run(false)
 	res = checker.Status()["last"].(*CheckResult)
 	for _, tc := range res.Targets {
 		if tc.Error != "" || len(tc.Queued) != 0 || len(tc.Waiting) == 0 {
@@ -296,7 +296,7 @@ func TestCheckProgress(t *testing.T) {
 	lc := LibraryCheck{Paths: []string{root}}
 	lc.normalize()
 	var lastFolders, lastFiles int
-	files := findMedia(lc, func(folders, files int, _ string) { lastFolders, lastFiles = folders, files }).Files
+	files := findMedia(lc, nil, func(folders, _, files int, _ string) { lastFolders, lastFiles = folders, files }).Files
 	if lastFolders != 3 || lastFiles != 3 || len(files) != 3 {
 		t.Errorf("folders=%d files=%d found=%d", lastFolders, lastFiles, len(files))
 	}
@@ -338,7 +338,7 @@ func TestCheckProgress(t *testing.T) {
 	}
 	checker := newChecker(store, newQueue(store))
 	done := make(chan bool)
-	go func() { done <- checker.Run() }()
+	go func() { done <- checker.Run(false) }()
 
 	<-paused
 	st := checker.Status()
@@ -389,7 +389,7 @@ func TestFindMediaSymlinks(t *testing.T) {
 	lc := LibraryCheck{Paths: []string{lib}}
 	lc.normalize()
 	lc.MinAgeMinutes = 10
-	got := findMedia(lc, nil)
+	got := findMedia(lc, nil, nil)
 	rel := []string{}
 	for _, f := range got.Files {
 		r, _ := filepath.Rel(lib, f)
@@ -400,8 +400,8 @@ func TestFindMediaSymlinks(t *testing.T) {
 	if !reflect.DeepEqual(rel, want) {
 		t.Errorf("files: got %v want %v", rel, want)
 	}
-	if got.Broken != 1 || len(got.BrokenSample) != 1 || !strings.HasSuffix(got.BrokenSample[0], "movies/B.mkv") {
-		t.Errorf("broken: %d %v", got.Broken, got.BrokenSample)
+	if got.Broken != 1 || len(got.BrokenPaths) != 1 || !strings.HasSuffix(got.BrokenPaths[0], "movies/B.mkv") {
+		t.Errorf("broken: %d %v", got.Broken, got.BrokenPaths)
 	}
 	if len(got.Errors) != 0 {
 		t.Errorf("errors: %v", got.Errors)
@@ -409,7 +409,7 @@ func TestFindMediaSymlinks(t *testing.T) {
 
 	// With symlinks ignored, none of the linked media is found.
 	lc.IgnoreSymlinks = true
-	if got := findMedia(lc, nil); len(got.Files) != 0 || got.Broken != 0 {
+	if got := findMedia(lc, nil, nil); len(got.Files) != 0 || got.Broken != 0 {
 		t.Errorf("ignore symlinks: files=%v broken=%d", got.Files, got.Broken)
 	}
 
@@ -418,7 +418,7 @@ func TestFindMediaSymlinks(t *testing.T) {
 	must(os.Symlink(lib, link))
 	lc.IgnoreSymlinks = false
 	lc.Paths = []string{link}
-	if got := findMedia(lc, nil); len(got.Files) != 3 {
+	if got := findMedia(lc, nil, nil); len(got.Files) != 3 {
 		t.Errorf("symlinked root: %v %v", got.Files, got.Errors)
 	}
 }
@@ -442,7 +442,7 @@ func TestFindMediaParallel(t *testing.T) {
 	run := func(workers int) (walkResult, time.Duration) {
 		lc.Workers = workers
 		start := time.Now()
-		res := findMedia(lc, nil)
+		res := findMedia(lc, nil, nil)
 		return res, time.Since(start)
 	}
 	one, slow := run(1)

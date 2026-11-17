@@ -133,10 +133,10 @@ For Plex, Media Scanner finds the library whose folder contains the rewritten pa
 
 Webhooks cover new downloads, but files can still be missed: a webhook fails, a file is copied in by hand, or a server skips a scan. The library check catches those.
 
-On a schedule (every 10 minutes by default) it:
+On a schedule it:
 
-1. Lists the media files in the folders you choose.
-2. Asks each selected Plex, Jellyfin or Emby server for the files it already has.
+1. Lists the media files in the folders you choose (every 10 minutes by default).
+2. Asks each selected Plex, Jellyfin or Emby server for the files it has (every 5 minutes by default), and compares them with the files from the last folder read.
 3. Requests a scan of every folder that has a file the server is missing. These scans use the same queue and path rewrites as the webhooks.
 
 Set it up on the **Library Check** tab:
@@ -153,6 +153,24 @@ The status area shows when the last check ran, how many files each server knows,
 While a check runs, the status updates every 2 seconds with its progress: how many media files and folders it has found so far (and the folder it's in), then which server it's asking and how many of that server's items have arrived, with a progress bar.
 
 Each check lists every item in the libraries that cover your folders, so on very large libraries you may want a longer interval, e.g. 30–60 minutes.
+
+**Caching:** both sides are cached between checks, so the frequent comparisons are cheap.
+
+- **Folders:** each folder's contents are remembered along with its modified time. On the next read, a folder whose modified time hasn't changed isn't listed again and its symlinks aren't looked up again, so a re-read mostly just checks each folder's modified time.
+- **Media servers:** each server's file list is kept. Later comparisons only ask for items changed since the last one (Plex: `updatedAt`, Jellyfin/Emby: `MinDateLastSaved`) and merge them in. If a server refuses that request, its whole list is fetched instead.
+- **Full check:** every **Full check every (hours)** (default 6), both caches are thrown away: every folder is read and each server's whole list is fetched. This catches what the caches can miss. On mergerfs, a folder's modified time may not change when a file lands on a different drive, and items deleted from a server stay in its stored list until the next full check. **Full check** on the Library Check tab does this straight away.
+
+The caches are kept in memory, so a restart of the container starts with a full check.
+
+**Broken symlinks:** links whose target can't be found are listed in full on the **Broken symlinks** card, with where each one points. The list can be searched, paged and downloaded as text. They're grouped by where they point, and each group is labelled:
+
+- **Target files are gone:** the folder exists in the container and has files, but these targets don't. The links can be deleted.
+- **Folder is empty:** maybe a mount (rclone, debrid, NFS) that's down. Deleting is blocked.
+- **Folder not found in container:** probably not mounted. Add it to the container's volumes at the same path. Deleting is blocked.
+
+You can override the block if you've checked the files really are gone.
+
+**Test** looks up the targets again and drops links that work now. **Delete** removes only the links, never the files they point to, and you confirm it by typing `DELETE`. Each link is checked again just before deleting: it must still be a symlink, still be broken and inside a checked folder. Deleting needs the folder mounted without `:ro`.
 
 **Speed:** folders are read 8 at a time by default (**Advanced → Folders read at the same time**). On union filesystems like mergerfs, network shares and FUSE mounts, most of the time goes on waiting for each folder listing, so raising this to 16–32 can make the first step much faster. On a single spinning disk, 1–4 is gentler. During a check the status shows how many folders a second it's reading. File ages for **Ignore files newer than** are only looked up for files a server is missing, so the walk itself only reads folder listings.
 

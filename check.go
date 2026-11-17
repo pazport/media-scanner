@@ -1,19 +1,12 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"io/fs"
 	"log"
-	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -26,19 +19,27 @@ type TargetCheck struct {
 	Queued  []string `json:"queued"`  // folders a scan was requested for
 	Waiting []string `json:"waiting"` // folders still missing but in cooldown
 	Error   string   `json:"error,omitempty"`
+	// Full is true when the server's whole list was fetched; otherwise only
+	// Fetched changed items were requested and merged into the stored list.
+	Full    bool      `json:"full"`
+	Fetched int       `json:"fetched"`
+	FullAt  time.Time `json:"full_at"` // when the whole list was last fetched
 }
 
 // CheckResult describes one library check run.
 type CheckResult struct {
 	Started  time.Time `json:"started"`
 	Duration string    `json:"duration"`
+	// Walked is true when the folders were read in this run. Otherwise the
+	// files from the walk at WalkedAt were compared again.
+	Walked   bool      `json:"walked"`
+	WalkedAt time.Time `json:"walked_at"`
 	Files    int       `json:"files"`   // media files found on disk
 	Folders  int       `json:"folders"` // folders looked through
+	Cached   int       `json:"cached"`  // of those, unchanged folders taken from the cache
 	Errors   []string  `json:"errors"`
-	// Symlinks whose target couldn't be found, usually because it isn't
-	// mounted into this container.
-	BrokenLinks  int      `json:"broken_links"`
-	BrokenSample []string `json:"broken_sample"`
+	// Symlinks whose target couldn't be found (listed by /api/broken).
+	BrokenLinks int `json:"broken_links"`
 	// Missing files skipped because they changed within the minimum age.
 	Recent  int           `json:"recent"`
 	Targets []TargetCheck `json:"targets"`
@@ -47,17 +48,32 @@ type CheckResult struct {
 // CheckProgress describes a check that is running, for the web UI.
 type CheckProgress struct {
 	Started time.Time `json:"started"`
+	Walk    bool      `json:"walk"`    // whether this run reads the folders
 	Step    string    `json:"step"`    // "files" while walking folders, "server" while asking a server
 	Folders int       `json:"folders"` // folders looked through so far
+	Cached  int       `json:"cached"`  // of those, taken from the cache
 	Files   int       `json:"files"`   // media files found so far
 	Current string    `json:"current"` // folder being walked, or server library being listed
 	Server  string    `json:"server"`  // server being asked
 	Type    string    `json:"type"`
 	Index   int       `json:"index"` // 1-based number of the server being asked
 	Servers int       `json:"servers"`
-	Items   int       `json:"items"` // items received from the current server (library)
-	Total   int       `json:"total"` // total the server reported, 0 if unknown
+	Changes bool      `json:"changes"` // only changes since the last check are being fetched
+	Items   int       `json:"items"`   // items received from the current server (library)
+	Total   int       `json:"total"`   // total the server reported, 0 if unknown
 }
+
+// knownCache is a media server's file list, kept between checks.
+type knownCache struct {
+	files  map[string]bool
+	fullAt time.Time // last time the whole list was fetched
+	syncAt time.Time // last time it was brought up to date
+	sig    string    // server and folders it was fetched for
+}
+
+// When asking a server for changes, go back this much further than the last
+// check, to allow for clock differences and items saved during that check.
+const syncOverlap = 10 * time.Minute
 
 // Checker runs the periodic library check.
 type Checker struct {
@@ -68,62 +84,91 @@ type Checker struct {
 	running  bool
 	progress CheckProgress
 	last     *CheckResult
-	lastRun  time.Time
 	cooldown map[string]time.Time // target ID + "\x00" + folder -> last scan request
+
+	// Kept between checks (written only by the running check).
+	files      []string               // media files from the last folder walk
+	walk       walkResult             // that walk's totals (Files and Cache aren't used)
+	walkedAt   time.Time              // when the folders were last read
+	walkSig    string                 // settings the walk and folder cache belong to
+	dirs       dirCache               // folder cache from the last walk
+	dirsFullAt time.Time              // last walk that read every folder
+	comparedAt time.Time              // when the servers were last compared
+	known      map[string]*knownCache // per target ID
+	broken     []BrokenLink           // broken symlinks from the last folder walk
 }
 
 func newChecker(store *Store, queue *Queue) *Checker {
-	return &Checker{store: store, queue: queue, cooldown: map[string]time.Time{}}
+	return &Checker{store: store, queue: queue, cooldown: map[string]time.Time{},
+		known: map[string]*knownCache{}}
 }
 
 // Status is shown in the web UI.
 func (c *Checker) Status() map[string]any {
 	cfg := c.store.Get()
+	lc := cfg.LibraryCheck
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	st := map[string]any{"running": c.running, "last": c.last, "enabled": cfg.LibraryCheck.Enabled}
+	st := map[string]any{"running": c.running, "last": c.last, "enabled": lc.Enabled,
+		"cached_folders": len(c.dirs), "broken": len(c.broken)}
 	if c.running {
 		p := c.progress
 		st["progress"] = &p
 	}
-	if cfg.LibraryCheck.Enabled {
-		next := time.Now()
-		if !c.lastRun.IsZero() {
-			next = c.lastRun.Add(time.Duration(cfg.LibraryCheck.IntervalMinutes) * time.Minute)
+	if !c.dirsFullAt.IsZero() {
+		st["full_at"] = c.dirsFullAt
+	}
+	if lc.Enabled {
+		now := time.Now()
+		nextWalk, nextCompare := now, now
+		if !c.walkedAt.IsZero() {
+			nextWalk = c.walkedAt.Add(time.Duration(lc.IntervalMinutes) * time.Minute)
 		}
-		st["next"] = next
+		if !c.comparedAt.IsZero() {
+			nextCompare = c.comparedAt.Add(time.Duration(lc.ServerIntervalMinutes) * time.Minute)
+		}
+		st["next_walk"], st["next_compare"] = nextWalk, nextCompare
 	}
 	return st
 }
 
-// Loop starts a check whenever the interval has passed.
+// Loop runs checks on schedule: the servers are compared every
+// ServerIntervalMinutes, and the folders are re-read every IntervalMinutes.
 func (c *Checker) Loop() {
 	time.Sleep(30 * time.Second) // let the media servers settle after a restart
 	for {
 		lc := c.store.Get().LibraryCheck
-		c.mu.Lock()
-		due := lc.Enabled && time.Since(c.lastRun) >= time.Duration(lc.IntervalMinutes)*time.Minute
-		c.mu.Unlock()
-		if due {
-			c.Run()
+		if lc.Enabled && len(lc.Paths) > 0 {
+			c.mu.Lock()
+			walkDue := c.files == nil || time.Since(c.walkedAt) >= time.Duration(lc.IntervalMinutes)*time.Minute
+			compareDue := time.Since(c.comparedAt) >= time.Duration(lc.ServerIntervalMinutes)*time.Minute
+			c.mu.Unlock()
+			if walkDue || compareDue {
+				c.run(walkDue, false)
+			}
 		}
 		time.Sleep(15 * time.Second)
 	}
 }
 
-// Run performs one check. It returns false if a check is already running.
-func (c *Checker) Run() bool {
+// Run performs a check now: the folders are read (using the folder cache) and
+// every server is compared. With full, every cache is ignored and rebuilt.
+// It returns false if a check is already running.
+func (c *Checker) Run(full bool) bool {
+	return c.run(true, full)
+}
+
+func (c *Checker) run(walk, full bool) bool {
 	c.mu.Lock()
 	if c.running {
 		c.mu.Unlock()
 		return false
 	}
 	c.running = true
-	c.lastRun = time.Now()
-	c.progress = CheckProgress{Started: c.lastRun, Step: "files"}
+	c.progress = CheckProgress{Started: time.Now(), Step: "files", Walk: walk}
 	c.mu.Unlock()
 
-	res := c.check(c.store.Get())
+	res := c.check(c.store.Get(), walk, full)
 
 	c.mu.Lock()
 	c.running = false
@@ -132,27 +177,64 @@ func (c *Checker) Run() bool {
 	return true
 }
 
-func (c *Checker) check(cfg *Config) *CheckResult {
+// walkSignature describes the settings that decide what a walk finds, so a
+// change to them invalidates the stored files and folder cache.
+func walkSignature(lc LibraryCheck) string {
+	return strings.Join([]string{
+		strings.Join(lc.Paths, "\x01"), strings.Join(lc.Extensions, "\x01"),
+		strings.Join(lc.IgnoreFolders, "\x01"), strings.Join(lc.IgnoreSuffixes, "\x01"),
+		map[bool]string{true: "nolinks", false: "links"}[lc.IgnoreSymlinks],
+	}, "\x00")
+}
+
+func (c *Checker) check(cfg *Config, walk, full bool) *CheckResult {
 	lc := cfg.LibraryCheck
 	start := time.Now()
-	res := &CheckResult{Started: start, Errors: []string{}, Targets: []TargetCheck{}, BrokenSample: []string{}}
+	res := &CheckResult{Started: start, Errors: []string{}, Targets: []TargetCheck{}}
 	defer func() { res.Duration = time.Since(start).Round(time.Millisecond).String() }()
 
 	if len(lc.Paths) == 0 {
 		res.Errors = append(res.Errors, "no folders configured")
 		return res
 	}
+	fullEvery := time.Duration(lc.FullRefreshHours) * time.Hour
 
-	// Files on disk, already rewritten into the shared path form the queue expects
+	// Step 1: the media files on disk. Read the folders when due (or when the
+	// settings changed), otherwise compare the files from the last walk again.
+	sig := walkSignature(lc)
+	if walk || c.files == nil || sig != c.walkSig {
+		prev := c.dirs
+		if full || sig != c.walkSig || time.Since(c.dirsFullAt) >= fullEvery {
+			prev = nil // read every folder, rebuilding the cache
+		}
+		c.update(func(p *CheckProgress) { p.Walk = true })
+		walked := findMedia(lc, prev, func(folders, cached, files int, current string) {
+			c.update(func(p *CheckProgress) { p.Folders, p.Cached, p.Files, p.Current = folders, cached, files, current })
+		})
+		c.mu.Lock()
+		c.files, c.dirs, c.walkSig, c.walkedAt = walked.Files, walked.Cache, sig, start
+		brokenPaths := walked.BrokenPaths
+		walked.Files, walked.Cache, walked.BrokenPaths = nil, nil, nil
+		c.walk = walked
+		if prev == nil {
+			c.dirsFullAt = start
+		}
+		c.mu.Unlock()
+		c.setBroken(brokenPaths)
+		res.Walked = true
+	} else {
+		c.update(func(p *CheckProgress) {
+			p.Walk, p.Folders, p.Cached, p.Files = false, c.walk.Folders, c.walk.Cached, len(c.files)
+		})
+	}
+	files := c.files
+	res.WalkedAt = c.walkedAt
+	res.Errors = append(res.Errors, c.walk.Errors...)
+	res.Files, res.Folders, res.Cached = len(files), c.walk.Folders, c.walk.Cached
+	res.BrokenLinks = c.walk.Broken
+
+	// Files on disk, rewritten into the shared path form the queue expects
 	// (library check rewrites, then global rewrites).
-	walked := findMedia(lc, func(folders, files int, current string) {
-		c.update(func(p *CheckProgress) { p.Folders, p.Files, p.Current = folders, files, current })
-	})
-	files := walked.Files
-	res.Errors = append(res.Errors, walked.Errors...)
-	res.Files = len(files)
-	res.Folders = walked.Folders
-	res.BrokenLinks, res.BrokenSample = walked.Broken, walked.BrokenSample
 	canon := make([]string, len(files))
 	for i, f := range files {
 		canon[i] = applyRewrites(applyRewrites(f, lc.Rewrites), cfg.Rewrites)
@@ -181,7 +263,6 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 	for i, p := range lc.Paths {
 		roots[i] = applyRewrites(applyRewrites(p, lc.Rewrites), cfg.Rewrites)
 	}
-
 	selected := map[string]bool{}
 	for _, id := range lc.Targets {
 		selected[id] = true
@@ -195,10 +276,11 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 		}
 	}
 
+	// Step 2: compare with each media server.
 	for i, t := range targets {
 		c.update(func(p *CheckProgress) {
 			p.Step, p.Server, p.Type, p.Index, p.Servers = "server", t.Name, t.Type, i+1, len(targets)
-			p.Current, p.Items, p.Total = "", 0, 0
+			p.Current, p.Items, p.Total, p.Changes = "", 0, 0, false
 		})
 		tc := TargetCheck{Target: t.Name, Type: t.Type, Queued: []string{}, Waiting: []string{}}
 		toServer := func(p string) string {
@@ -208,9 +290,7 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 		for i, r := range roots {
 			serverRoots[i] = toServer(r)
 		}
-		known, err := t.KnownFiles(serverRoots, func(library string, items, total int) {
-			c.update(func(p *CheckProgress) { p.Current, p.Items, p.Total = library, items, total })
-		})
+		known, err := c.serverFiles(t, serverRoots, full, fullEvery, &tc)
 		if err != nil {
 			tc.Error = err.Error()
 			res.Targets = append(res.Targets, tc)
@@ -253,18 +333,66 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 		res.Targets = append(res.Targets, tc)
 	}
 
-	// Forget cooldowns for folders that are no longer missing anywhere.
 	c.mu.Lock()
+	c.comparedAt = start
+	// Forget cooldowns that have passed, and stored lists of removed servers.
 	for k, v := range c.cooldown {
 		if time.Since(v) >= cooldown {
 			delete(c.cooldown, k)
 		}
 	}
+	ids := map[string]bool{}
+	for _, t := range cfg.Targets {
+		ids[t.ID] = true
+	}
+	for id := range c.known {
+		if !ids[id] {
+			delete(c.known, id)
+		}
+	}
 	c.mu.Unlock()
 
 	res.Recent = len(recent)
-	log.Printf("library check: %d files, %d servers checked in %s", res.Files, len(res.Targets), time.Since(start).Round(time.Millisecond))
+	log.Printf("library check: %d files (walked: %v, %d of %d folders from cache), %d servers checked in %s",
+		res.Files, res.Walked, res.Cached, res.Folders, len(res.Targets), time.Since(start).Round(time.Millisecond))
 	return res
+}
+
+// serverFiles returns a server's media files. The list is kept between checks:
+// normally only items changed since the last check are requested and merged
+// in, and the whole list is fetched again every fullEvery (or when forced, or
+// when the server or folders changed). Asking for changes falls back to the
+// whole list if the server refuses.
+func (c *Checker) serverFiles(t Target, roots []string, full bool, fullEvery time.Duration, tc *TargetCheck) (map[string]bool, error) {
+	progress := func(library string, items, total int) {
+		c.update(func(p *CheckProgress) { p.Current, p.Items, p.Total = library, items, total })
+	}
+	sig := t.Type + "\x00" + t.URL + "\x00" + strings.Join(roots, "\x00")
+	now := time.Now()
+	kc := c.known[t.ID]
+	if kc != nil && !full && kc.sig == sig && now.Sub(kc.fullAt) < fullEvery {
+		c.update(func(p *CheckProgress) { p.Changes = true })
+		changed, err := t.KnownFiles(roots, kc.syncAt.Add(-syncOverlap), progress)
+		if err == nil {
+			for f := range changed {
+				kc.files[f] = true
+			}
+			kc.syncAt = now
+			tc.Fetched, tc.FullAt = len(changed), kc.fullAt
+			return kc.files, nil
+		}
+		log.Printf("library check: %s: asking for changes failed (%v), fetching the whole list", t.Name, err)
+		c.update(func(p *CheckProgress) { p.Changes = false })
+	}
+	files, err := t.KnownFiles(roots, time.Time{}, progress)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.known[t.ID] = &knownCache{files: files, fullAt: now, syncAt: now, sig: sig}
+	c.mu.Unlock()
+	tc.Full, tc.Fetched, tc.FullAt = true, len(files), now
+	return files, nil
 }
 
 // update changes the progress shown while a check runs.
@@ -272,409 +400,4 @@ func (c *Checker) update(f func(*CheckProgress)) {
 	c.mu.Lock()
 	f(&c.progress)
 	c.mu.Unlock()
-}
-
-// walkResult is what findMedia found on disk.
-type walkResult struct {
-	Files        []string // sorted
-	Errors       []string
-	Folders      int
-	Broken       int      // symlinks whose target doesn't exist (inside this container)
-	BrokenSample []string // a few of them, to show in the UI
-}
-
-const brokenSampleSize = 10
-
-// readDir is os.ReadDir; tests replace it to simulate a slow filesystem.
-var readDir = os.ReadDir
-
-// findMedia walks the configured folders and returns media file paths.
-//
-// Several folders are read at once (lc.Workers): on union, network and FUSE
-// filesystems most of the time goes on waiting for each folder listing, so
-// overlapping them is much faster than reading one at a time. Only folders,
-// symlinks and the names in each listing are looked at; file ages are checked
-// later, and only for files a server is missing.
-//
-// Symlinked files and folders are followed unless lc.IgnoreSymlinks is set;
-// paths are reported as the link path, which is what the media servers see.
-// progress, if not nil, is called as folders are read, with running totals.
-func findMedia(lc LibraryCheck, progress func(folders, files int, current string)) walkResult {
-	w := &walker{
-		lc:         lc,
-		exts:       map[string]bool{},
-		ignoreDirs: map[string]bool{},
-		visited:    map[string]bool{},
-		progress:   progress,
-		res:        walkResult{Files: []string{}, Errors: []string{}, BrokenSample: []string{}},
-	}
-	w.cond = sync.NewCond(&w.mu)
-	for _, e := range lc.Extensions {
-		w.exts[e] = true
-	}
-	for _, d := range lc.IgnoreFolders {
-		w.ignoreDirs[strings.ToLower(strings.TrimSpace(d))] = true
-	}
-	for _, root := range lc.Paths {
-		info, err := os.Stat(root) // follows a symlinked root
-		if err != nil {
-			w.res.Errors = append(w.res.Errors, fmt.Sprintf("%s: %v", root, err))
-			continue
-		}
-		if !info.IsDir() {
-			w.res.Errors = append(w.res.Errors, fmt.Sprintf("%s: not a folder", root))
-			continue
-		}
-		w.push(dirJob{path: root, info: info, root: true})
-	}
-
-	workers := lc.Workers
-	if workers < 1 {
-		workers = 1
-	}
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				job, ok := w.pop()
-				if !ok {
-					return
-				}
-				w.readFolder(job)
-				w.done()
-			}
-		}()
-	}
-	wg.Wait()
-
-	sort.Strings(w.res.Files)
-	if progress != nil {
-		progress(w.res.Folders, len(w.res.Files), "")
-	}
-	return w.res
-}
-
-type dirJob struct {
-	path string
-	info fs.FileInfo
-	root bool
-}
-
-type walker struct {
-	lc         LibraryCheck
-	exts       map[string]bool
-	ignoreDirs map[string]bool
-	progress   func(folders, files int, current string)
-
-	mu      sync.Mutex
-	cond    *sync.Cond
-	queue   []dirJob
-	pending int             // folders queued or being read; 0 means the walk is done
-	visited map[string]bool // real folders already queued, so symlink loops end
-	res     walkResult
-}
-
-// push queues a folder unless the same real folder was already queued.
-func (w *walker) push(job dirJob) {
-	key := dirKey(job.path, job.info)
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.visited[key] {
-		return
-	}
-	w.visited[key] = true
-	w.queue = append(w.queue, job)
-	w.pending++
-	w.cond.Signal()
-}
-
-// pop waits for a folder to read. It returns false once every folder is done.
-func (w *walker) pop() (dirJob, bool) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for len(w.queue) == 0 && w.pending > 0 {
-		w.cond.Wait()
-	}
-	if len(w.queue) == 0 {
-		return dirJob{}, false
-	}
-	// Last in, first out: finishes one show before starting the next, which
-	// keeps the queue short.
-	job := w.queue[len(w.queue)-1]
-	w.queue = w.queue[:len(w.queue)-1]
-	return job, true
-}
-
-// done marks a folder as read and wakes the other workers when all are done.
-func (w *walker) done() {
-	w.mu.Lock()
-	w.pending--
-	if w.pending == 0 {
-		w.cond.Broadcast()
-	}
-	w.mu.Unlock()
-}
-
-// dirKey identifies a folder on disk regardless of the path used to reach it.
-func dirKey(p string, info fs.FileInfo) string {
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		return fmt.Sprintf("%d:%d", st.Dev, st.Ino)
-	}
-	if real, err := filepath.EvalSymlinks(p); err == nil {
-		return real
-	}
-	return p
-}
-
-// readFolder lists one folder, records its media files and queues its subfolders.
-func (w *walker) readFolder(job dirJob) {
-	entries, err := readDir(job.path)
-	if err != nil {
-		if job.root {
-			w.mu.Lock()
-			w.res.Errors = append(w.res.Errors, fmt.Sprintf("%s: %v", job.path, err))
-			w.mu.Unlock()
-		}
-		return // unreadable subfolder: skip it
-	}
-	var files, broken []string
-	var subdirs []dirJob
-	for _, e := range entries {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		p := filepath.Join(job.path, name)
-		typ := e.Type()
-
-		if typ&fs.ModeSymlink != 0 {
-			if w.lc.IgnoreSymlinks {
-				continue
-			}
-			target, err := os.Stat(p)
-			if err != nil {
-				broken = append(broken, filepath.ToSlash(p))
-				continue
-			}
-			if target.IsDir() {
-				if !w.ignoreDirs[strings.ToLower(name)] {
-					subdirs = append(subdirs, dirJob{path: p, info: target})
-				}
-			} else if target.Mode().IsRegular() && w.isMedia(name) {
-				files = append(files, filepath.ToSlash(p))
-			}
-			continue
-		}
-
-		if e.IsDir() {
-			if w.ignoreDirs[strings.ToLower(name)] {
-				continue
-			}
-			if info, err := e.Info(); err == nil {
-				subdirs = append(subdirs, dirJob{path: p, info: info})
-			}
-			continue
-		}
-		if typ.IsRegular() && w.isMedia(name) {
-			files = append(files, filepath.ToSlash(p))
-		}
-	}
-
-	w.mu.Lock()
-	w.res.Folders++
-	w.res.Files = append(w.res.Files, files...)
-	w.res.Broken += len(broken)
-	for _, b := range broken {
-		if len(w.res.BrokenSample) < brokenSampleSize {
-			w.res.BrokenSample = append(w.res.BrokenSample, b)
-		}
-	}
-	folders, found := w.res.Folders, len(w.res.Files)
-	w.mu.Unlock()
-	if w.progress != nil {
-		w.progress(folders, found, filepath.ToSlash(job.path))
-	}
-	for _, d := range subdirs {
-		w.push(d)
-	}
-}
-
-// isMedia reports whether a file name has a media extension and isn't an
-// extra or sample.
-func (w *walker) isMedia(name string) bool {
-	ext := strings.ToLower(filepath.Ext(name))
-	if !w.exts[ext] {
-		return false
-	}
-	base := strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name)))
-	for _, s := range w.lc.IgnoreSuffixes {
-		if s = strings.ToLower(strings.TrimSpace(s)); s != "" && strings.HasSuffix(base, s) {
-			return false
-		}
-	}
-	return true
-}
-
-// normPath makes paths from different systems comparable: forward slashes,
-// and lower case for Windows drive paths (which are case-insensitive).
-func normPath(p string) string {
-	p = strings.ReplaceAll(p, "\\", "/")
-	if len(p) >= 2 && p[1] == ':' {
-		p = strings.ToLower(p)
-	}
-	return path.Clean(p)
-}
-
-// pageProgress reports, after each page, the library being listed, the items
-// received from it so far and its total size (0 if the server didn't say).
-type pageProgress func(library string, items, total int)
-
-// KnownFiles returns the (normalised) paths of every media file the server
-// has indexed under any of roots. progress may be nil.
-func (t Target) KnownFiles(roots []string, progress pageProgress) (map[string]bool, error) {
-	if progress == nil {
-		progress = func(string, int, int) {}
-	}
-	switch t.Type {
-	case "plex":
-		return t.plexFiles(roots, progress)
-	case "jellyfin", "emby":
-		return t.embyFiles(progress)
-	}
-	return nil, fmt.Errorf("unknown target type %q", t.Type)
-}
-
-// overlaps reports whether a and b are the same folder or one contains the other.
-func overlaps(a, b string) bool {
-	a, b = normPath(a), normPath(b)
-	return pathWithin(a, b) || pathWithin(b, a)
-}
-
-var pageSize = 1000 // items per request when listing a library (a var so tests can page)
-
-func (t Target) plexFiles(roots []string, progress pageProgress) (map[string]bool, error) {
-	secs, err := t.plexSections()
-	if err != nil {
-		return nil, err
-	}
-	// Plex item types that carry media files, per library type.
-	itemType := map[string]string{"movie": "1", "show": "4", "artist": "10"}
-	known := map[string]bool{}
-	for _, sec := range secs {
-		typ, ok := itemType[sec.Type]
-		if !ok {
-			continue
-		}
-		relevant := false
-		for _, loc := range sec.Location {
-			for _, r := range roots {
-				if overlaps(loc.Path, r) {
-					relevant = true
-				}
-			}
-		}
-		if !relevant {
-			continue
-		}
-		progress(sec.Title, 0, 0)
-		received := 0
-		for start := 0; ; start += pageSize {
-			q := url.Values{
-				"type":                   {typ},
-				"X-Plex-Container-Start": {strconv.Itoa(start)},
-				"X-Plex-Container-Size":  {strconv.Itoa(pageSize)},
-			}
-			req, err := t.newRequest("GET", "/library/sections/"+sec.Key+"/all?"+q.Encode(), nil)
-			if err != nil {
-				return nil, err
-			}
-			body, err := doRequest(req)
-			if err != nil {
-				return nil, fmt.Errorf("listing library %q: %w", sec.Title, err)
-			}
-			var res struct {
-				MediaContainer struct {
-					TotalSize int `json:"totalSize"`
-					Metadata  []struct {
-						Media []struct {
-							Part []struct {
-								File string `json:"file"`
-							} `json:"Part"`
-						} `json:"Media"`
-					} `json:"Metadata"`
-				} `json:"MediaContainer"`
-			}
-			if err := json.Unmarshal(body, &res); err != nil {
-				return nil, fmt.Errorf("unexpected response from plex: %w", err)
-			}
-			for _, m := range res.MediaContainer.Metadata {
-				for _, media := range m.Media {
-					for _, part := range media.Part {
-						if part.File != "" {
-							known[normPath(part.File)] = true
-						}
-					}
-				}
-			}
-			received += len(res.MediaContainer.Metadata)
-			progress(sec.Title, received, res.MediaContainer.TotalSize)
-			if len(res.MediaContainer.Metadata) < pageSize {
-				break
-			}
-		}
-	}
-	return known, nil
-}
-
-func (t Target) embyFiles(progress pageProgress) (map[string]bool, error) {
-	known := map[string]bool{}
-	progress("", 0, 0)
-	for start := 0; ; start += pageSize {
-		q := url.Values{
-			"Recursive":        {"true"},
-			"IsFolder":         {"false"},
-			"IncludeItemTypes": {"Movie,Episode,Audio,MusicVideo,Video"},
-			"Fields":           {"Path,MediaSources"},
-			"EnableImages":     {"false"},
-			"EnableUserData":   {"false"},
-			"StartIndex":       {strconv.Itoa(start)},
-			"Limit":            {strconv.Itoa(pageSize)},
-		}
-		req, err := t.newRequest("GET", "/Items?"+q.Encode(), nil)
-		if err != nil {
-			return nil, err
-		}
-		body, err := doRequest(req)
-		if err != nil {
-			return nil, fmt.Errorf("listing items: %w", err)
-		}
-		var res struct {
-			Items []struct {
-				Path         string
-				MediaSources []struct{ Path string }
-			}
-			TotalRecordCount int
-		}
-		if err := json.Unmarshal(body, &res); err != nil {
-			return nil, fmt.Errorf("unexpected response from %s: %w", t.Type, err)
-		}
-		for _, it := range res.Items {
-			if it.Path != "" {
-				known[normPath(it.Path)] = true
-			}
-			// Extra versions of the same movie/episode are separate files.
-			for _, ms := range it.MediaSources {
-				if ms.Path != "" {
-					known[normPath(ms.Path)] = true
-				}
-			}
-		}
-		progress("", start+len(res.Items), res.TotalRecordCount)
-		if len(res.Items) < pageSize || (res.TotalRecordCount > 0 && start+len(res.Items) >= res.TotalRecordCount) {
-			break
-		}
-	}
-	return known, nil
 }
