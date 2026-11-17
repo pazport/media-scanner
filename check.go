@@ -37,9 +37,11 @@ type CheckResult struct {
 	Errors   []string  `json:"errors"`
 	// Symlinks whose target couldn't be found, usually because it isn't
 	// mounted into this container.
-	BrokenLinks  int           `json:"broken_links"`
-	BrokenSample []string      `json:"broken_sample"`
-	Targets      []TargetCheck `json:"targets"`
+	BrokenLinks  int      `json:"broken_links"`
+	BrokenSample []string `json:"broken_sample"`
+	// Missing files skipped because they changed within the minimum age.
+	Recent  int           `json:"recent"`
+	Targets []TargetCheck `json:"targets"`
 }
 
 // CheckProgress describes a check that is running, for the web UI.
@@ -143,7 +145,7 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 
 	// Files on disk, already rewritten into the shared path form the queue expects
 	// (library check rewrites, then global rewrites).
-	walked := findMedia(lc, time.Now(), func(folders, files int, current string) {
+	walked := findMedia(lc, func(folders, files int, current string) {
 		c.update(func(p *CheckProgress) { p.Folders, p.Files, p.Current = folders, files, current })
 	})
 	files := walked.Files
@@ -155,6 +157,26 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 	for i, f := range files {
 		canon[i] = applyRewrites(applyRewrites(f, lc.Rewrites), cfg.Rewrites)
 	}
+	// Files modified recently may still be copying. Rather than looking up every
+	// file's age while walking (slow on large or network filesystems), only the
+	// files a server is missing are checked, once each.
+	minAge := time.Duration(lc.MinAgeMinutes) * time.Minute
+	recent := map[int]bool{}
+	checkedAge := map[int]bool{}
+	tooNew := func(i int) bool {
+		if minAge <= 0 {
+			return false
+		}
+		if !checkedAge[i] {
+			checkedAge[i] = true
+			info, err := os.Stat(files[i]) // follows symlinks: the real file's age
+			if err != nil || time.Since(info.ModTime()) < minAge {
+				recent[i] = true
+			}
+		}
+		return recent[i]
+	}
+
 	roots := make([]string, len(lc.Paths))
 	for i, p := range lc.Paths {
 		roots[i] = applyRewrites(applyRewrites(p, lc.Rewrites), cfg.Rewrites)
@@ -198,8 +220,11 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 		tc.Known = len(known)
 
 		missingDirs := map[string]bool{}
-		for _, p := range canon {
+		for i, p := range canon {
 			if !known[normPath(toServer(p))] {
+				if tooNew(i) {
+					continue
+				}
 				tc.Missing++
 				missingDirs[path.Dir(p)] = true
 			}
@@ -237,6 +262,7 @@ func (c *Checker) check(cfg *Config) *CheckResult {
 	}
 	c.mu.Unlock()
 
+	res.Recent = len(recent)
 	log.Printf("library check: %d files, %d servers checked in %s", res.Files, len(res.Targets), time.Since(start).Round(time.Millisecond))
 	return res
 }
@@ -250,7 +276,7 @@ func (c *Checker) update(f func(*CheckProgress)) {
 
 // walkResult is what findMedia found on disk.
 type walkResult struct {
-	Files        []string
+	Files        []string // sorted
 	Errors       []string
 	Folders      int
 	Broken       int      // symlinks whose target doesn't exist (inside this container)
@@ -259,21 +285,30 @@ type walkResult struct {
 
 const brokenSampleSize = 10
 
+// readDir is os.ReadDir; tests replace it to simulate a slow filesystem.
+var readDir = os.ReadDir
+
 // findMedia walks the configured folders and returns media file paths.
+//
+// Several folders are read at once (lc.Workers): on union, network and FUSE
+// filesystems most of the time goes on waiting for each folder listing, so
+// overlapping them is much faster than reading one at a time. Only folders,
+// symlinks and the names in each listing are looked at; file ages are checked
+// later, and only for files a server is missing.
+//
 // Symlinked files and folders are followed unless lc.IgnoreSymlinks is set;
 // paths are reported as the link path, which is what the media servers see.
-// progress, if not nil, is called for every folder with the running totals.
-func findMedia(lc LibraryCheck, now time.Time, progress func(folders, files int, current string)) walkResult {
+// progress, if not nil, is called as folders are read, with running totals.
+func findMedia(lc LibraryCheck, progress func(folders, files int, current string)) walkResult {
 	w := &walker{
 		lc:         lc,
-		now:        now,
-		minAge:     time.Duration(lc.MinAgeMinutes) * time.Minute,
 		exts:       map[string]bool{},
 		ignoreDirs: map[string]bool{},
 		visited:    map[string]bool{},
 		progress:   progress,
 		res:        walkResult{Files: []string{}, Errors: []string{}, BrokenSample: []string{}},
 	}
+	w.cond = sync.NewCond(&w.mu)
 	for _, e := range lc.Extensions {
 		w.exts[e] = true
 	}
@@ -290,23 +325,96 @@ func findMedia(lc LibraryCheck, now time.Time, progress func(folders, files int,
 			w.res.Errors = append(w.res.Errors, fmt.Sprintf("%s: not a folder", root))
 			continue
 		}
-		w.walk(root, info, true)
+		w.push(dirJob{path: root, info: info, root: true})
 	}
+
+	workers := lc.Workers
+	if workers < 1 {
+		workers = 1
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				job, ok := w.pop()
+				if !ok {
+					return
+				}
+				w.readFolder(job)
+				w.done()
+			}
+		}()
+	}
+	wg.Wait()
+
+	sort.Strings(w.res.Files)
 	if progress != nil {
 		progress(w.res.Folders, len(w.res.Files), "")
 	}
 	return w.res
 }
 
+type dirJob struct {
+	path string
+	info fs.FileInfo
+	root bool
+}
+
 type walker struct {
 	lc         LibraryCheck
-	now        time.Time
-	minAge     time.Duration
 	exts       map[string]bool
 	ignoreDirs map[string]bool
-	visited    map[string]bool // real folders already walked, so symlink loops end
 	progress   func(folders, files int, current string)
-	res        walkResult
+
+	mu      sync.Mutex
+	cond    *sync.Cond
+	queue   []dirJob
+	pending int             // folders queued or being read; 0 means the walk is done
+	visited map[string]bool // real folders already queued, so symlink loops end
+	res     walkResult
+}
+
+// push queues a folder unless the same real folder was already queued.
+func (w *walker) push(job dirJob) {
+	key := dirKey(job.path, job.info)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.visited[key] {
+		return
+	}
+	w.visited[key] = true
+	w.queue = append(w.queue, job)
+	w.pending++
+	w.cond.Signal()
+}
+
+// pop waits for a folder to read. It returns false once every folder is done.
+func (w *walker) pop() (dirJob, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for len(w.queue) == 0 && w.pending > 0 {
+		w.cond.Wait()
+	}
+	if len(w.queue) == 0 {
+		return dirJob{}, false
+	}
+	// Last in, first out: finishes one show before starting the next, which
+	// keeps the queue short.
+	job := w.queue[len(w.queue)-1]
+	w.queue = w.queue[:len(w.queue)-1]
+	return job, true
+}
+
+// done marks a folder as read and wakes the other workers when all are done.
+func (w *walker) done() {
+	w.mu.Lock()
+	w.pending--
+	if w.pending == 0 {
+		w.cond.Broadcast()
+	}
+	w.mu.Unlock()
 }
 
 // dirKey identifies a folder on disk regardless of the path used to reach it.
@@ -320,30 +428,25 @@ func dirKey(p string, info fs.FileInfo) string {
 	return p
 }
 
-func (w *walker) walk(dir string, info fs.FileInfo, isRoot bool) {
-	key := dirKey(dir, info)
-	if w.visited[key] {
-		return
-	}
-	w.visited[key] = true
-
-	entries, err := os.ReadDir(dir)
+// readFolder lists one folder, records its media files and queues its subfolders.
+func (w *walker) readFolder(job dirJob) {
+	entries, err := readDir(job.path)
 	if err != nil {
-		if isRoot {
-			w.res.Errors = append(w.res.Errors, fmt.Sprintf("%s: %v", dir, err))
+		if job.root {
+			w.mu.Lock()
+			w.res.Errors = append(w.res.Errors, fmt.Sprintf("%s: %v", job.path, err))
+			w.mu.Unlock()
 		}
 		return // unreadable subfolder: skip it
 	}
-	w.res.Folders++
-	if w.progress != nil {
-		w.progress(w.res.Folders, len(w.res.Files), filepath.ToSlash(dir))
-	}
+	var files, broken []string
+	var subdirs []dirJob
 	for _, e := range entries {
 		name := e.Name()
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		p := filepath.Join(dir, name)
+		p := filepath.Join(job.path, name)
 		typ := e.Type()
 
 		if typ&fs.ModeSymlink != 0 {
@@ -352,18 +455,15 @@ func (w *walker) walk(dir string, info fs.FileInfo, isRoot bool) {
 			}
 			target, err := os.Stat(p)
 			if err != nil {
-				w.res.Broken++
-				if len(w.res.BrokenSample) < brokenSampleSize {
-					w.res.BrokenSample = append(w.res.BrokenSample, filepath.ToSlash(p))
-				}
+				broken = append(broken, filepath.ToSlash(p))
 				continue
 			}
 			if target.IsDir() {
 				if !w.ignoreDirs[strings.ToLower(name)] {
-					w.walk(p, target, false)
+					subdirs = append(subdirs, dirJob{path: p, info: target})
 				}
-			} else if target.Mode().IsRegular() {
-				w.file(p, name, target)
+			} else if target.Mode().IsRegular() && w.isMedia(name) {
+				files = append(files, filepath.ToSlash(p))
 			}
 			continue
 		}
@@ -372,43 +472,49 @@ func (w *walker) walk(dir string, info fs.FileInfo, isRoot bool) {
 			if w.ignoreDirs[strings.ToLower(name)] {
 				continue
 			}
-			info, err := e.Info()
-			if err == nil {
-				w.walk(p, info, false)
+			if info, err := e.Info(); err == nil {
+				subdirs = append(subdirs, dirJob{path: p, info: info})
 			}
 			continue
 		}
-		if typ.IsRegular() {
-			w.file(p, name, nil)
+		if typ.IsRegular() && w.isMedia(name) {
+			files = append(files, filepath.ToSlash(p))
 		}
+	}
+
+	w.mu.Lock()
+	w.res.Folders++
+	w.res.Files = append(w.res.Files, files...)
+	w.res.Broken += len(broken)
+	for _, b := range broken {
+		if len(w.res.BrokenSample) < brokenSampleSize {
+			w.res.BrokenSample = append(w.res.BrokenSample, b)
+		}
+	}
+	folders, found := w.res.Folders, len(w.res.Files)
+	w.mu.Unlock()
+	if w.progress != nil {
+		w.progress(folders, found, filepath.ToSlash(job.path))
+	}
+	for _, d := range subdirs {
+		w.push(d)
 	}
 }
 
-// file adds p if it is a media file that passes the filters. info may be nil
-// (it is only fetched when the minimum age needs it).
-func (w *walker) file(p, name string, info fs.FileInfo) {
+// isMedia reports whether a file name has a media extension and isn't an
+// extra or sample.
+func (w *walker) isMedia(name string) bool {
 	ext := strings.ToLower(filepath.Ext(name))
 	if !w.exts[ext] {
-		return
+		return false
 	}
 	base := strings.ToLower(strings.TrimSuffix(name, filepath.Ext(name)))
 	for _, s := range w.lc.IgnoreSuffixes {
 		if s = strings.ToLower(strings.TrimSpace(s)); s != "" && strings.HasSuffix(base, s) {
-			return
+			return false
 		}
 	}
-	if w.minAge > 0 {
-		if info == nil {
-			var err error
-			if info, err = os.Stat(p); err != nil {
-				return
-			}
-		}
-		if w.now.Sub(info.ModTime()) < w.minAge {
-			return
-		}
-	}
-	w.res.Files = append(w.res.Files, filepath.ToSlash(p))
+	return true
 }
 
 // normPath makes paths from different systems comparable: forward slashes,

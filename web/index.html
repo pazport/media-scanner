@@ -179,6 +179,9 @@
             <p class="hint">Extras folders that servers don't list as normal items.</p></div>
           <div><label>Ignore file names ending in (comma separated)</label><input id="lc-ignore-suffix">
             <p class="hint">Matched before the extension, e.g. <code>-trailer</code>.</p></div>
+          <div><label>Folders read at the same time</label><input type="number" id="lc-workers" min="1" max="64">
+            <p class="hint">Higher is faster on network, union (mergerfs) and FUSE filesystems. Try 16–32 if the
+              check is slow; use 1–4 for a single spinning disk.</p></div>
         </div>
         <label class="chip" style="margin-top:12px;width:fit-content"><input type="checkbox" id="lc-follow"> Follow symlinks</label>
         <p class="hint">Counts symlinked files and walks into symlinked folders. A link's target must also be mounted
@@ -427,6 +430,7 @@ function renderCheck() {
   $('#lc-ignore-dirs').value = lc.ignore_folders.join(', ');
   $('#lc-ignore-suffix').value = lc.ignore_suffixes.join(', ');
   $('#lc-follow').checked = !lc.ignore_symlinks;
+  $('#lc-workers').value = lc.scan_workers;
   // folder list
   const box = $('#lc-paths'); box.innerHTML = '';
   lc.paths.forEach((p, i) => {
@@ -464,6 +468,7 @@ $('#lc-ext').oninput = e => { cfg.library_check.extensions = csv(e.target.value)
 $('#lc-ignore-dirs').oninput = e => { cfg.library_check.ignore_folders = csv(e.target.value); setDirty(); };
 $('#lc-ignore-suffix').oninput = e => { cfg.library_check.ignore_suffixes = csv(e.target.value); setDirty(); };
 $('#lc-follow').onchange = e => { cfg.library_check.ignore_symlinks = !e.target.checked; setDirty(); };
+$('#lc-workers').oninput = e => { cfg.library_check.scan_workers = parseInt(e.target.value) || 0; setDirty(); };
 $('#lc-run').onclick = async () => {
   if (dirty) { toast('Save your changes first.', false); return; }
   try { await api('POST', '/api/check/run'); toast('Library check started.'); setTimeout(refreshCheck, 300); }
@@ -483,7 +488,8 @@ function renderProgress(p) {
   const out = [`<p><b>Checking now…</b> <span class="muted">(${elapsed})</span></p>`];
   const filesLine = `Found <b>${num(p.files)}</b> media files in ${num(p.folders)} folders`;
   if (p.step === 'files') {
-    out.push(`<p class="prog-step">Step 1: looking for media files. ${filesLine} so far.</p>`, bar(0, 0));
+    const rate = secs >= 3 ? ` (about ${num(Math.round(p.folders / secs))} folders a second)` : '';
+    out.push(`<p class="prog-step">Step 1: looking for media files. ${filesLine} so far${rate}.</p>`, bar(0, 0));
     if (p.current) out.push(`<p class="prog-current" title="${esc(p.current)}">${esc(p.current)}</p>`);
   } else {
     out.push(`<p class="prog-step done">Step 1 of ${steps}: ${filesLine}. ✓</p>`);
@@ -514,6 +520,8 @@ async function refreshCheck() {
     const r = s.last;
     if (r) {
       parts.push(`<p>${s.running ? 'Previous' : 'Last'} run ${fmtTime(r.started)}, took ${esc(r.duration)}. Found <b>${num(r.files)}</b> media files in ${num(r.folders)} folders.</p>`);
+      if (r.recent) parts.push(`<p class="muted">${num(r.recent)} missing file(s) changed in the last
+        ${num(cfg.library_check.min_age_minutes)} minutes were left for the next check, in case they're still being copied.</p>`);
       if (r.broken_links) parts.push(`<p class="test-result err">Skipped ${num(r.broken_links)} broken symlink(s): their targets
         can't be found inside this container. Mount the folders the links point to, at the same paths.</p>` +
         folderList(r.broken_sample, r.broken_links > r.broken_sample.length ? 'examples' : 'link(s)'));
