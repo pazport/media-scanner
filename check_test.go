@@ -400,8 +400,8 @@ func TestFindMediaSymlinks(t *testing.T) {
 	if !reflect.DeepEqual(rel, want) {
 		t.Errorf("files: got %v want %v", rel, want)
 	}
-	if got.Broken != 1 || len(got.BrokenSample) != 1 || !strings.HasSuffix(got.BrokenSample[0], "movies/B.mkv") {
-		t.Errorf("broken: %d %v", got.Broken, got.BrokenSample)
+	if got.Broken != 1 || len(got.BrokenPaths) != 1 || !strings.HasSuffix(got.BrokenPaths[0], "movies/B.mkv") {
+		t.Errorf("broken: %d %v", got.Broken, got.BrokenPaths)
 	}
 	if len(got.Errors) != 0 {
 		t.Errorf("errors: %v", got.Errors)

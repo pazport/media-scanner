@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -131,6 +133,61 @@ func (a *App) routes() http.Handler {
 		}
 		go a.checker.Run(r.URL.Query().Get("full") == "1")
 		writeJSON(w, 200, map[string]string{"status": "started"})
+	})
+
+	// Broken symlinks found by the library check.
+	mux.HandleFunc("GET /api/broken", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		writeJSON(w, 200, a.checker.BrokenList(q.Get("group"), q.Get("q"), offset, limit))
+	})
+	mux.HandleFunc("GET /api/broken.txt", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="broken-symlinks.txt"`)
+		io.WriteString(w, a.checker.BrokenText())
+	})
+	type brokenReq struct {
+		Paths []string `json:"paths"`
+		Group string   `json:"group"`
+		All   bool     `json:"all"`
+		Force bool     `json:"force"`
+	}
+	readBroken := func(w http.ResponseWriter, r *http.Request) (brokenReq, bool) {
+		var req brokenReq
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<20)).Decode(&req); err != nil {
+			writeJSON(w, 400, map[string]string{"error": "invalid JSON"})
+			return req, false
+		}
+		if !req.All && req.Group == "" && len(req.Paths) == 0 {
+			writeJSON(w, 400, map[string]string{"error": "nothing selected"})
+			return req, false
+		}
+		return req, true
+	}
+	mux.HandleFunc("POST /api/broken/test", func(w http.ResponseWriter, r *http.Request) {
+		req, ok := readBroken(w, r)
+		if !ok {
+			return
+		}
+		res, err := a.checker.TestBroken(req.Paths, req.Group, req.All)
+		if err != nil {
+			writeJSON(w, 409, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, res)
+	})
+	mux.HandleFunc("POST /api/broken/delete", func(w http.ResponseWriter, r *http.Request) {
+		req, ok := readBroken(w, r)
+		if !ok {
+			return
+		}
+		res, err := a.checker.DeleteBroken(req.Paths, req.Group, req.All, req.Force)
+		if err != nil {
+			writeJSON(w, 409, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, res)
 	})
 
 	sub, _ := fs.Sub(webFS, "web")

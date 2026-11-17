@@ -162,6 +162,16 @@ Each check lists every item in the libraries that cover your folders, so on very
 
 The caches are kept in memory, so a restart of the container starts with a full check.
 
+**Broken symlinks:** links whose target can't be found are listed in full on the **Broken symlinks** card, with where each one points. The list can be searched, paged and downloaded as text. They're grouped by where they point, and each group is labelled:
+
+- **Target files are gone:** the folder exists in the container and has files, but these targets don't. The links can be deleted.
+- **Folder is empty:** maybe a mount (rclone, debrid, NFS) that's down. Deleting is blocked.
+- **Folder not found in container:** probably not mounted. Add it to the container's volumes at the same path. Deleting is blocked.
+
+You can override the block if you've checked the files really are gone.
+
+**Test** looks up the targets again and drops links that work now. **Delete** removes only the links, never the files they point to, and you confirm it by typing `DELETE`. Each link is checked again just before deleting: it must still be a symlink, still be broken and inside a checked folder. Deleting needs the folder mounted without `:ro`.
+
 **Speed:** folders are read 8 at a time by default (**Advanced → Folders read at the same time**). On union filesystems like mergerfs, network shares and FUSE mounts, most of the time goes on waiting for each folder listing, so raising this to 16–32 can make the first step much faster. On a single spinning disk, 1–4 is gentler. During a check the status shows how many folders a second it's reading. File ages for **Ignore files newer than** are only looked up for files a server is missing, so the walk itself only reads folder listings.
 
 ## Manual scans

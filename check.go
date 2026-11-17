@@ -38,10 +38,8 @@ type CheckResult struct {
 	Folders  int       `json:"folders"` // folders looked through
 	Cached   int       `json:"cached"`  // of those, unchanged folders taken from the cache
 	Errors   []string  `json:"errors"`
-	// Symlinks whose target couldn't be found, usually because it isn't
-	// mounted into this container.
-	BrokenLinks  int      `json:"broken_links"`
-	BrokenSample []string `json:"broken_sample"`
+	// Symlinks whose target couldn't be found (listed by /api/broken).
+	BrokenLinks int `json:"broken_links"`
 	// Missing files skipped because they changed within the minimum age.
 	Recent  int           `json:"recent"`
 	Targets []TargetCheck `json:"targets"`
@@ -97,6 +95,7 @@ type Checker struct {
 	dirsFullAt time.Time              // last walk that read every folder
 	comparedAt time.Time              // when the servers were last compared
 	known      map[string]*knownCache // per target ID
+	broken     []BrokenLink           // broken symlinks from the last folder walk
 }
 
 func newChecker(store *Store, queue *Queue) *Checker {
@@ -111,7 +110,7 @@ func (c *Checker) Status() map[string]any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := map[string]any{"running": c.running, "last": c.last, "enabled": lc.Enabled,
-		"cached_folders": len(c.dirs)}
+		"cached_folders": len(c.dirs), "broken": len(c.broken)}
 	if c.running {
 		p := c.progress
 		st["progress"] = &p
@@ -191,7 +190,7 @@ func walkSignature(lc LibraryCheck) string {
 func (c *Checker) check(cfg *Config, walk, full bool) *CheckResult {
 	lc := cfg.LibraryCheck
 	start := time.Now()
-	res := &CheckResult{Started: start, Errors: []string{}, Targets: []TargetCheck{}, BrokenSample: []string{}}
+	res := &CheckResult{Started: start, Errors: []string{}, Targets: []TargetCheck{}}
 	defer func() { res.Duration = time.Since(start).Round(time.Millisecond).String() }()
 
 	if len(lc.Paths) == 0 {
@@ -214,12 +213,14 @@ func (c *Checker) check(cfg *Config, walk, full bool) *CheckResult {
 		})
 		c.mu.Lock()
 		c.files, c.dirs, c.walkSig, c.walkedAt = walked.Files, walked.Cache, sig, start
-		walked.Files, walked.Cache = nil, nil
+		brokenPaths := walked.BrokenPaths
+		walked.Files, walked.Cache, walked.BrokenPaths = nil, nil, nil
 		c.walk = walked
 		if prev == nil {
 			c.dirsFullAt = start
 		}
 		c.mu.Unlock()
+		c.setBroken(brokenPaths)
 		res.Walked = true
 	} else {
 		c.update(func(p *CheckProgress) {
@@ -230,7 +231,7 @@ func (c *Checker) check(cfg *Config, walk, full bool) *CheckResult {
 	res.WalkedAt = c.walkedAt
 	res.Errors = append(res.Errors, c.walk.Errors...)
 	res.Files, res.Folders, res.Cached = len(files), c.walk.Folders, c.walk.Cached
-	res.BrokenLinks, res.BrokenSample = c.walk.Broken, c.walk.BrokenSample
+	res.BrokenLinks = c.walk.Broken
 
 	// Files on disk, rewritten into the shared path form the queue expects
 	// (library check rewrites, then global rewrites).

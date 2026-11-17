@@ -39,16 +39,17 @@ type dirCache map[string]*cachedDir
 
 // walkResult is what findMedia found on disk.
 type walkResult struct {
-	Files        []string // sorted
-	Errors       []string
-	Folders      int      // folders looked through
-	Cached       int      // of those, folders whose contents came from the cache
-	Broken       int      // symlinks whose target doesn't exist (inside this container)
-	BrokenSample []string // a few of them, to show in the UI
-	Cache        dirCache // every folder read, for the next walk
+	Files       []string // sorted
+	Errors      []string
+	Folders     int      // folders looked through
+	Cached      int      // of those, folders whose contents came from the cache
+	Broken      int      // symlinks whose target doesn't exist (inside this container)
+	BrokenPaths []string // all of them (up to maxBroken), sorted
+	Cache       dirCache // every folder read, for the next walk
 }
 
-const brokenSampleSize = 10
+// maxBroken caps how many broken symlinks are listed (they are all counted).
+const maxBroken = 200000
 
 // readDir is os.ReadDir; tests replace it to count reads or simulate a slow filesystem.
 var readDir = os.ReadDir
@@ -77,7 +78,7 @@ func findMedia(lc LibraryCheck, prev dirCache, progress walkProgress) walkResult
 		ignoreDirs: map[string]bool{},
 		visited:    map[string]bool{},
 		progress:   progress,
-		res: walkResult{Files: []string{}, Errors: []string{}, BrokenSample: []string{},
+		res: walkResult{Files: []string{}, Errors: []string{}, BrokenPaths: []string{},
 			Cache: dirCache{}},
 	}
 	w.cond = sync.NewCond(&w.mu)
@@ -113,6 +114,7 @@ func findMedia(lc LibraryCheck, prev dirCache, progress walkProgress) walkResult
 	wg.Wait()
 
 	sort.Strings(w.res.Files)
+	sort.Strings(w.res.BrokenPaths)
 	if progress != nil {
 		progress(w.res.Folders, w.res.Cached, len(w.res.Files), "")
 	}
@@ -310,8 +312,8 @@ func (w *walker) readFolder(job dirJob) {
 	w.res.Files = append(w.res.Files, files...)
 	w.res.Broken += len(broken)
 	for _, b := range broken {
-		if len(w.res.BrokenSample) < brokenSampleSize {
-			w.res.BrokenSample = append(w.res.BrokenSample, b)
+		if len(w.res.BrokenPaths) < maxBroken {
+			w.res.BrokenPaths = append(w.res.BrokenPaths, b)
 		}
 	}
 	folders, cached, found := w.res.Folders, w.res.Cached, len(w.res.Files)

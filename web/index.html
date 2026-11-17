@@ -42,6 +42,7 @@
   .btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
   .btn.danger { color: var(--err); }
   .btn.small { padding: 4px 10px; font-size: 12px; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; border-color: var(--border); }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px; }
   .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
@@ -78,6 +79,8 @@
   .progress.busy > div { width: 30%; animation: slide 1.2s infinite linear; }
   @keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
   @media (prefers-reduced-motion: reduce) { .progress.busy > div { animation: none; width: 100%; opacity: .4; } }
+  .bk-list { max-height: 480px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+  .bk-list thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
   .prog-step { margin: 0 0 2px; } .prog-step.done { color: var(--muted); }
   .prog-current { color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace;
                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: 0; }
@@ -201,6 +204,30 @@
         <button class="btn" id="lc-run">Run check now</button>
         <button class="btn" id="lc-run-full" title="Ignore the caches: read every folder and fetch each server's whole list">Full check</button></div>
       <div id="lc-status" class="muted">No check has run yet.</div>
+    </div>
+    <div class="card" id="bk-card" style="display:none">
+      <div class="row" style="margin-bottom:8px"><h2 style="margin:0;flex:1">Broken symlinks <span class="muted" id="bk-total"></span></h2>
+        <button class="btn" id="bk-test-all">Test all again</button>
+        <a class="btn" href="/api/broken.txt" download>Download list</a></div>
+      <p class="hint" style="margin-bottom:10px">These links point to files this container can't find. They're grouped by
+        where they point, so you can tell files that are really gone from a folder that just isn't mounted here.
+        Deleting removes only the links, never the files they point to, and needs the folder mounted without <code>:ro</code>.</p>
+      <div class="table-wrap"><table><thead><tr><th>Links point into</th><th>Links</th><th>What it means</th><th></th></tr></thead>
+        <tbody id="bk-groups"></tbody></table></div>
+      <label class="chip" style="margin:10px 0;width:fit-content"><input type="checkbox" id="bk-force">
+        Also allow deleting links whose target folder looks unmounted (I've checked the files are really gone)</label>
+      <h3>Links <span class="muted" id="bk-filter"></span></h3>
+      <div class="row" style="margin-bottom:8px">
+        <input id="bk-search" placeholder="Search links or targets" style="flex:1;min-width:200px">
+        <button class="btn small" id="bk-clear" style="display:none">Show all groups</button></div>
+      <div class="table-wrap bk-list"><table><thead><tr><th style="width:28px"><input type="checkbox" id="bk-check-page" aria-label="Select this page"></th>
+        <th>Link</th><th>Points to</th></tr></thead><tbody id="bk-items"></tbody></table></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn small" id="bk-prev">‹ Previous</button><span class="muted" id="bk-page"></span>
+        <button class="btn small" id="bk-next">Next ›</button><span class="spacer"></span>
+        <button class="btn small" id="bk-test-sel" disabled>Test selected</button>
+        <button class="btn small danger" id="bk-del-sel" disabled>Delete selected</button></div>
+      <div id="bk-result" style="margin-top:10px"></div>
     </div>
   </section>
 
@@ -548,9 +575,8 @@ async function refreshCheck() {
       parts.push(`<p>${s.running ? 'Previous' : 'Last'} run ${fmtTime(r.started)}, took ${esc(r.duration)}. ${disk}</p>`);
       if (r.recent) parts.push(`<p class="muted">${num(r.recent)} missing file(s) changed in the last
         ${num(cfg.library_check.min_age_minutes)} minutes were left for the next check, in case they're still being copied.</p>`);
-      if (r.broken_links) parts.push(`<p class="test-result err">Skipped ${num(r.broken_links)} broken symlink(s): their targets
-        can't be found inside this container. Mount the folders the links point to, at the same paths.</p>` +
-        folderList(r.broken_sample, r.broken_links > r.broken_sample.length ? 'examples' : 'link(s)'));
+      if (s.broken) parts.push(`<p class="test-result err">${num(s.broken)} broken symlink(s): their targets can't be found
+        inside this container. See <b>Broken symlinks</b> below for the full list.</p>`);
       r.errors.forEach(e => parts.push(`<p class="test-result err">${esc(e)}</p>`));
       parts.push(`<div class="table-wrap"><table><thead><tr><th>Server</th><th>Files on server</th><th>Missing</th><th>Details</th></tr></thead><tbody>` +
         (r.targets.length ? r.targets.map(t => `<tr><td><span class="badge ${t.type}">${t.type}</span> ${esc(t.target)}</td>
@@ -563,8 +589,109 @@ async function refreshCheck() {
           : '<tr><td colspan="4" class="empty">No media servers selected.</td></tr>') + '</tbody></table></div>');
     }
     setStatus(parts.join('') || 'No check has run yet.');
+    if (s.broken !== bk.count || (s.running !== bk.running)) { bk.count = s.broken; bk.running = s.running; refreshBroken(); }
   } catch (e) { /* server restarting */ }
 }
+
+// ---------- broken symlinks ----------
+const PAGE = 100;
+const bk = { count: -1, running: false, group: '', q: '', offset: 0, selected: new Set(), groups: [] };
+const BK_STATUS = {
+  gone: ['ok', 'Target files are gone', 'This folder exists in the container and has files in it, but the files these links point to are gone. Safe to delete.'],
+  empty: ['queued', 'Folder is empty', "This folder is empty in the container. If it's a mount (rclone, debrid, NFS), it may be down and the files may still exist."],
+  missing: ['error', 'Folder not found in container', "This folder doesn't exist in the container, so it's probably not mounted. Add it to the container's volumes at the same path, then click Test."],
+};
+async function refreshBroken() {
+  try {
+    const qs = new URLSearchParams({ group: bk.group, q: bk.q, offset: bk.offset, limit: PAGE });
+    const d = await api('GET', '/api/broken?' + qs);
+    bk.groups = d.groups;
+    $('#bk-card').style.display = d.total ? '' : 'none';
+    $('#bk-total').textContent = `(${num(d.total)})`;
+    const force = $('#bk-force').checked;
+    $('#bk-groups').innerHTML = d.groups.map((g, i) => {
+      const [cls, label, desc] = BK_STATUS[g.status] || ['', g.status, ''];
+      const canDelete = g.deletable || force;
+      return `<tr><td class="path">${esc(g.folder)}</td><td>${num(g.count)}</td>
+        <td><span class="badge ${cls}">${label}</span><div class="hint">${esc(desc)}</div></td>
+        <td style="white-space:nowrap"><button class="btn small" data-show="${i}">Show</button>
+          <button class="btn small" data-test="${i}">Test</button>
+          <button class="btn small danger" data-del="${i}" ${canDelete ? '' : 'disabled title="Looks unmounted: tick the box below to allow"'}>Delete ${num(g.count)}</button></td></tr>`;
+    }).join('');
+    $('#bk-filter').textContent = bk.group ? `in ${bk.group}` : '';
+    $('#bk-clear').style.display = bk.group ? '' : 'none';
+    $('#bk-items').innerHTML = d.items.length ? d.items.map(l => `<tr>
+        <td><input type="checkbox" class="bk-sel" value="${esc(l.path)}" ${bk.selected.has(l.path) ? 'checked' : ''}></td>
+        <td class="path">${esc(l.path)}</td><td class="path">${esc(l.target || '(unreadable)')}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="empty">No matching links.</td></tr>';
+    const last = Math.min(d.offset + PAGE, d.matched);
+    $('#bk-page').textContent = d.matched ? `${num(d.offset + 1)}–${num(last)} of ${num(d.matched)}` : '';
+    $('#bk-prev').disabled = d.offset === 0;
+    $('#bk-next').disabled = last >= d.matched;
+    $('#bk-check-page').checked = d.items.length > 0 && d.items.every(l => bk.selected.has(l.path));
+    updateBkSelection();
+  } catch (e) { /* server restarting */ }
+}
+function updateBkSelection() {
+  const n = bk.selected.size;
+  $('#bk-test-sel').disabled = $('#bk-del-sel').disabled = !n || bk.running;
+  $('#bk-test-sel').textContent = n ? `Test selected (${num(n)})` : 'Test selected';
+  $('#bk-del-sel').textContent = n ? `Delete selected (${num(n)})` : 'Delete selected';
+}
+function bkResult(html, ok = true) { $('#bk-result').innerHTML = `<p class="test-result ${ok ? 'ok' : 'err'}">${html}</p>`; }
+async function bkTest(body) {
+  try {
+    const r = await api('POST', '/api/broken/test', body);
+    bkResult(`Tested ${num(r.tested)} link(s): ${num(r.fixed)} work now and were removed from the list,
+      ${num(r.still_broken)} are still broken.${r.fixed ? ' The next folder read will count the ones that work.' : ''}`);
+    bk.selected.clear(); refreshBroken(); refreshCheck();
+  } catch (e) { bkResult(esc(e.message), false); }
+}
+async function bkDelete(body, n, where) {
+  const force = $('#bk-force').checked;
+  const warn = force ? "\n\nYou've allowed deleting links whose target folder looks unmounted. If that folder is just not mounted, those links aren't really broken." : '';
+  const answer = prompt(`Delete ${num(n)} broken symlink(s)${where}?\n\nOnly the links are removed, not the files they point to. ` +
+    `Each link is checked again first, and links that work now are kept.${warn}\n\nType DELETE to confirm.`);
+  if (answer === null) return;
+  if (answer.trim() !== 'DELETE') { bkResult('Not deleted: you need to type DELETE to confirm.', false); return; }
+  try {
+    const r = await api('POST', '/api/broken/delete', { ...body, force });
+    const lines = [`Deleted ${num(r.deleted)} of ${num(r.selected)} link(s).`];
+    if (r.skipped_count) lines.push(`Skipped ${num(r.skipped_count)}: ` +
+      r.skipped.slice(0, 3).map(p => `${esc(p.path.split('/').pop())} (${esc(p.reason)})`).join('; ') + (r.skipped_count > 3 ? '; …' : ''));
+    if (r.failed_count) lines.push(`Failed ${num(r.failed_count)}: ${esc(r.failed[0].reason)}`);
+    bkResult(lines.join('<br>'), !r.failed_count);
+    bk.selected.clear(); refreshBroken(); refreshCheck();
+  } catch (e) { bkResult(esc(e.message), false); }
+}
+$('#bk-groups').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const g = bk.groups[b.dataset.show ?? b.dataset.test ?? b.dataset.del]; if (!g) return;
+  if (b.dataset.show !== undefined) { bk.group = g.folder; bk.offset = 0; refreshBroken(); }
+  else if (b.dataset.test !== undefined) bkTest({ group: g.folder });
+  else bkDelete({ group: g.folder }, g.count, ` pointing into ${g.folder}`);
+};
+$('#bk-items').onchange = e => {
+  if (!e.target.classList.contains('bk-sel')) return;
+  e.target.checked ? bk.selected.add(e.target.value) : bk.selected.delete(e.target.value);
+  updateBkSelection();
+};
+$('#bk-check-page').onchange = e => {
+  document.querySelectorAll('.bk-sel').forEach(cb => {
+    cb.checked = e.target.checked;
+    e.target.checked ? bk.selected.add(cb.value) : bk.selected.delete(cb.value);
+  });
+  updateBkSelection();
+};
+let bkSearchTimer;
+$('#bk-search').oninput = e => { clearTimeout(bkSearchTimer); bkSearchTimer = setTimeout(() => { bk.q = e.target.value.trim(); bk.offset = 0; refreshBroken(); }, 300); };
+$('#bk-clear').onclick = () => { bk.group = ''; bk.offset = 0; refreshBroken(); };
+$('#bk-prev').onclick = () => { bk.offset = Math.max(0, bk.offset - PAGE); refreshBroken(); };
+$('#bk-next').onclick = () => { bk.offset += PAGE; refreshBroken(); };
+$('#bk-force').onchange = () => refreshBroken();
+$('#bk-test-all').onclick = () => bkTest({ all: true });
+$('#bk-test-sel').onclick = () => bkTest({ paths: [...bk.selected] });
+$('#bk-del-sel').onclick = () => bkDelete({ paths: [...bk.selected] }, bk.selected.size, '');
 
 function renderAll() { renderTargets(); renderTriggers(); renderSettings(); renderCheck(); }
 
