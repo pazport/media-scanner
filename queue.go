@@ -17,7 +17,8 @@ type Event struct {
 }
 
 type pending struct {
-	path    string
+	path      string // path sent to media servers
+	checkPath string // path as mounted inside the Media Scanner container
 	source  string
 	targets map[string]bool // target IDs
 	all     bool
@@ -62,7 +63,14 @@ func (q *Queue) recordLocked(e Event) {
 }
 
 // Add queues a path from a trigger. Trigger rewrites are applied by the caller.
+// For normal webhooks, the path to check and the path to scan are identical.
 func (q *Queue) Add(source, path string, all bool, targetIDs []string) {
+	q.AddWithCheckPath(source, path, path, all, targetIDs)
+}
+
+// AddWithCheckPath keeps the container filesystem path separate from the
+// canonical path that must be sent to the media server.
+func (q *Queue) AddWithCheckPath(source, path, checkPath string, all bool, targetIDs []string) {
 	cfg := q.store.Get()
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -145,7 +153,11 @@ func (q *Queue) process(p *pending) {
 
 	cfg := q.store.Get()
 	lc := cfg.LibraryCheck
-	lc.Paths = []string{p.path}
+	checkPath := p.checkPath
+	if checkPath == "" {
+		checkPath = p.path
+	}
+	lc.Paths = []string{checkPath}
 	lc.normalize()
 	found := findMedia(lc, nil, nil)
 	if len(found.Errors) > 0 {
