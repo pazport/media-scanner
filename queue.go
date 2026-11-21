@@ -28,16 +28,21 @@ type pending struct {
 type Queue struct {
 	store *Store
 
-	mu      sync.Mutex
-	items   map[string]*pending
-	history []Event
-	stats   map[string]int
+	mu             sync.Mutex
+	items          map[string]*pending
+	history        []Event
+	stats          map[string]int
+	fileCheckDelay time.Duration
 }
 
-const historySize = 200
+const (
+	historySize      = 200
+	defaultFileCheckDelay = 5 * time.Second
+)
 
 func newQueue(store *Store) *Queue {
-	return &Queue{store: store, items: map[string]*pending{}, stats: map[string]int{}}
+	return &Queue{store: store, items: map[string]*pending{}, stats: map[string]int{},
+		fileCheckDelay: defaultFileCheckDelay}
 }
 
 func (q *Queue) record(e Event) {
@@ -130,8 +135,30 @@ func (q *Queue) Run() {
 	}
 }
 
+// process waits briefly for mounts/downloads to settle, then checks the actual
+// container filesystem. A server scan is only sent if at least one supported
+// media file is present beneath the queued directory.
 func (q *Queue) process(p *pending) {
+	if q.fileCheckDelay > 0 {
+		time.Sleep(q.fileCheckDelay)
+	}
+
 	cfg := q.store.Get()
+	lc := cfg.LibraryCheck
+	lc.Paths = []string{p.path}
+	lc.normalize()
+	found := findMedia(lc, nil, nil)
+	if len(found.Errors) > 0 {
+		q.record(Event{Source: p.source, Path: p.path, Status: "error",
+			Message: "filesystem check failed: " + found.Errors[0]})
+		return
+	}
+	if len(found.Files) == 0 {
+		q.record(Event{Source: p.source, Path: p.path, Status: "skipped",
+			Message: "no media files found after filesystem check; no server scan sent"})
+		return
+	}
+
 	sent := 0
 	for _, t := range cfg.Targets {
 		if !t.Enabled || (!p.all && !p.targets[t.ID]) {
