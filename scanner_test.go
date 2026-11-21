@@ -197,3 +197,33 @@ func TestEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+
+func TestEnqueueChecksTriggerPathBeforeGlobalRewrite(t *testing.T) {
+	store, err := loadStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := store.Get()
+	cfg.ScanDelay = 0
+	mountedRoot := filepath.Join(t.TempDir(), "mounted")
+	cfg.Triggers["manual"].Rewrites = []Rewrite{{From: "/arr", To: mountedRoot}}
+	cfg.Rewrites = []Rewrite{{From: mountedRoot, To: "/content-vault/content"}}
+	if err := store.Set(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	q := newQueue(store)
+	app := &App{store: store, queue: q}
+	app.enqueue("manual", "/arr/TV/Show/Season 02", store.Get(), store.Get().Triggers["manual"])
+
+	q.mu.Lock()
+	p := q.items["/content-vault/content/TV/Show/Season 02"]
+	q.mu.Unlock()
+	if p == nil {
+		t.Fatal("expected queued scan path after global rewrite")
+	}
+	if want := filepath.ToSlash(filepath.Join(mountedRoot, "TV/Show/Season 02")); p.checkPath != want {
+		t.Fatalf("filesystem check path = %q, want original mounted path %q", p.checkPath, want)
+	}
+}
