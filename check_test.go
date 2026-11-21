@@ -197,6 +197,7 @@ func TestLibraryCheck(t *testing.T) {
 	pageSize = 2 // Jellyfin's 3 items arrive as pages of 2 + 1
 
 	queue := newQueue(store)
+	queue.fileCheckDelay = 0 // the filesystem delay is tested separately
 	checker := newChecker(store, queue)
 	if !checker.Run(false) {
 		t.Fatal("check did not run")
