@@ -27,7 +27,7 @@ After the configured queue delay, each queued location waits a further 5 seconds
 - If no media file is found, no server is contacted and the dashboard history records a **skipped** event.
 - If the path cannot be read or does not exist, no server is contacted and the history records an **error**.
 
-Make sure the relevant media folders (and symlink targets, if used) are mounted into the Media Scanner container at the paths supplied by the webhook. The filesystem check uses the trigger/global-rewritten path as seen inside the scanner container; server-type and individual-server rewrites are only applied afterwards for the outgoing scan request.
+Make sure the relevant media folders (and symlink targets, if used) are mounted into the Media Scanner container at the paths supplied by the webhook. For webhook and manual scans, the filesystem check uses the original incoming path after trigger-specific rewrites, but before global rewrites. Global, server-type and individual-server rewrites are used for the outgoing media-server scan path, not to probe the filesystem. This lets you check a real mounted path such as `/sbx/mnt/union-zfs` while sending a mapped path such as `/content-vault/content` to Plex.
 
 ## Images
 
