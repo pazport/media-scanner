@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -124,7 +125,7 @@ func TestEndToEnd(t *testing.T) {
 		writeFile(t, filepath.Join(mediaRoot, name), time.Hour)
 	}
 	cfg.Auth = Auth{Username: "u", Password: "p"}
-	cfg.Rewrites = []Rewrite{{From: "/data", To: mediaRoot}}
+	cfg.Rewrites = []Rewrite{}
 	// Type rewrite for all Plex servers, then Plex's own rewrite on top.
 	cfg.TypeRewrites["plex"] = []Rewrite{{From: mediaRoot, To: "/srv"}}
 	cfg.TypeRewrites["emby"] = []Rewrite{{From: filepath.Join(mediaRoot, "movies"), To: "/emby-movies"}}
@@ -168,8 +169,8 @@ func TestEndToEnd(t *testing.T) {
 	if code := post("/triggers/radarr", `{"eventType":"Test"}`, true); code != 200 {
 		t.Fatalf("test event: %d", code)
 	}
-	post("/triggers/radarr", `{"eventType":"Download","movie":{"folderPath":"/data/movies/A (2020)"}}`, true)
-	post("/triggers/sonarr", `{"eventType":"Download","series":{"path":"/data/tv/Show"},"episodeFile":{"relativePath":"Season 01/x.mkv"}}`, true)
+	post("/triggers/radarr", fmt.Sprintf(`{"eventType":"Download","movie":{"folderPath":%q}}`, filepath.Join(mediaRoot, "movies/A (2020)")), true)
+	post("/triggers/sonarr", fmt.Sprintf(`{"eventType":"Download","series":{"path":%q},"episodeFile":{"relativePath":"Season 01/x.mkv"}}`, filepath.Join(mediaRoot, "tv/Show")), true)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && (len(plex.get()) < 1 || len(jf.get()) < 2 || len(emby.get()) < 1) {
