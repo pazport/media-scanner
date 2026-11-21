@@ -77,7 +77,8 @@ func (q *Queue) AddWithCheckPath(source, path, checkPath string, all bool, targe
 	p := q.items[path]
 	if p == nil {
 		p = &pending{
-			path:    path,
+			path:      path,
+			checkPath: checkPath,
 			source:  source,
 			targets: map[string]bool{},
 			due:     time.Now().Add(time.Duration(cfg.ScanDelay) * time.Second),
