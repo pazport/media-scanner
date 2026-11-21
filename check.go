@@ -299,14 +299,19 @@ func (c *Checker) check(cfg *Config, walk, full bool) *CheckResult {
 		}
 		tc.Known = len(known)
 
-		missingDirs := map[string]bool{}
+		// Keep the on-disk directory for the pre-scan filesystem check,
+		// while retaining the canonical directory for the media-server scan.
+		missingDirs := map[string]string{}
 		for i, p := range canon {
 			if !known[normPath(toServer(p))] {
 				if tooNew(i) {
 					continue
 				}
 				tc.Missing++
-				missingDirs[path.Dir(p)] = true
+				canonicalDir := path.Dir(p)
+				if _, exists := missingDirs[canonicalDir]; !exists {
+					missingDirs[canonicalDir] = path.Dir(files[i])
+				}
 			}
 		}
 		dirs := make([]string, 0, len(missingDirs))
@@ -324,7 +329,7 @@ func (c *Checker) check(cfg *Config, walk, full bool) *CheckResult {
 			}
 			c.mu.Unlock()
 			if ready {
-				c.queue.Add("check", d, false, []string{t.ID})
+				c.queue.AddWithCheckPath("check", d, missingDirs[d], false, []string{t.ID})
 				tc.Queued = append(tc.Queued, d)
 			} else {
 				tc.Waiting = append(tc.Waiting, d)
