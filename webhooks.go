@@ -153,9 +153,13 @@ func (a *App) handleArr(source string) http.HandlerFunc {
 }
 
 func (a *App) enqueue(source, pth string, cfg *Config, trig *Trigger) {
-	pth = applyRewrites(pth, trig.Rewrites)
-	pth = applyRewrites(pth, cfg.Rewrites)
-	a.queue.Add(source, pth, trig.AllTargets, trig.Targets)
+	// Trigger rewrites map the source application's path to the location visible
+	// inside this container. Preserve that path for the local filesystem check.
+	// Global rewrites then map it to the canonical path expected by the media
+	// servers, and must not be used to probe the filesystem.
+	checkPath := applyRewrites(pth, trig.Rewrites)
+	scanPath := applyRewrites(checkPath, cfg.Rewrites)
+	a.queue.AddWithCheckPath(source, scanPath, checkPath, trig.AllTargets, trig.Targets)
 }
 
 // handleManual accepts ?path=/a&path=/b or a JSON body {"paths": [...], "targets": [...]}.
