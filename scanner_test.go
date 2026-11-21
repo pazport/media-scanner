@@ -119,11 +119,15 @@ func TestEndToEnd(t *testing.T) {
 	}
 	cfg := store.Get()
 	cfg.ScanDelay = 0
+	mediaRoot := t.TempDir()
+	for _, name := range []string{"movies/A (2020)/A.mkv", "tv/Show/Season 01/E01.mkv"} {
+		writeFile(t, filepath.Join(mediaRoot, name), time.Hour)
+	}
 	cfg.Auth = Auth{Username: "u", Password: "p"}
-	cfg.Rewrites = []Rewrite{{From: "/data", To: "/media"}}
+	cfg.Rewrites = []Rewrite{{From: "/data", To: mediaRoot}}
 	// Type rewrite for all Plex servers, then Plex's own rewrite on top.
-	cfg.TypeRewrites["plex"] = []Rewrite{{From: "/media", To: "/srv"}}
-	cfg.TypeRewrites["emby"] = []Rewrite{{From: "/media/movies", To: "/emby-movies"}}
+	cfg.TypeRewrites["plex"] = []Rewrite{{From: mediaRoot, To: "/srv"}}
+	cfg.TypeRewrites["emby"] = []Rewrite{{From: filepath.Join(mediaRoot, "movies"), To: "/emby-movies"}}
 	cfg.Targets = []Target{
 		{ID: "p", Name: "Plex", Type: "plex", URL: plex.URL, Token: "plextoken", Enabled: true,
 			Rewrites: []Rewrite{{From: "/srv", To: "/plex"}}},
@@ -137,7 +141,9 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app := &App{store: store, queue: newQueue(store)}
+	queue := newQueue(store)
+	queue.fileCheckDelay = 0 // delay is covered by a focused unit test
+	app := &App{store: store, queue: queue}
 	go app.queue.Run()
 	srv := httptest.NewServer(app.routes())
 	defer srv.Close()
@@ -174,7 +180,7 @@ func TestEndToEnd(t *testing.T) {
 	}
 	jfHits := jf.get()
 	sort.Strings(jfHits)
-	if !reflect.DeepEqual(jfHits, []string{"/media/movies/A (2020)", "/media/tv/Show/Season 01"}) {
+	if !reflect.DeepEqual(jfHits, []string{filepath.Join(mediaRoot, "movies/A (2020)"), filepath.Join(mediaRoot, "tv/Show/Season 01")}) {
 		t.Errorf("jellyfin hits: %v", jfHits)
 	}
 	if got := emby.get(); !reflect.DeepEqual(got, []string{"/emby-movies/A (2020)"}) {
