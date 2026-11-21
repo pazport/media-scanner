@@ -68,3 +68,31 @@ func TestQueueProcessWaitsBeforeFilesystemCheck(t *testing.T) {
 	q.process(&pending{path:root, source:"manual", targets:map[string]bool{}})
 	if time.Since(start) < 20*time.Millisecond { t.Fatal("filesystem check ran before delay") }
 }
+
+
+func TestQueueProcessChecksMountedPathButScansCanonicalPath(t *testing.T) {
+	mounted := t.TempDir()
+	if err := os.WriteFile(filepath.Join(mounted, "Episode.mkv"), []byte("media"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	const canonical = "/content-vault/content/TV-Kids/Example/Season 02"
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct { Updates []struct { Path string } }
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil { t.Errorf("decode request: %v", err) }
+		if len(body.Updates) == 1 { gotPath = body.Updates[0].Path }
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	store, err := loadStore(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil { t.Fatal(err) }
+	cfg := store.Get()
+	cfg.Targets = []Target{{ID:"j", Name:"Jellyfin", Type:"jellyfin", URL:server.URL, Enabled:true}}
+	if err := store.Set(cfg); err != nil { t.Fatal(err) }
+	q := newQueue(store)
+	q.fileCheckDelay = 0
+	q.process(&pending{path:canonical, checkPath:mounted, source:"check", all:true, targets:map[string]bool{}})
+	if gotPath != canonical { t.Fatalf("server scan path = %q, want %q", gotPath, canonical) }
+	h := q.History()
+	if len(h) != 1 || h[0].Status != "ok" { t.Fatalf("expected successful scan, got %#v", h) }
+}
