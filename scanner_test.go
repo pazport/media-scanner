@@ -364,6 +364,10 @@ func TestEmbyConnectionUsesCompatibilityInfoRoute(t *testing.T) {
 			io.WriteString(w, `{"ServerName":"Test Emby","Version":"4.8.0"}`)
 			return
 		}
+		if r.URL.Path == "/emby/Library/SelectableMediaFolders" {
+			io.WriteString(w, `[{"Name":"Movies","SubFolders":[{"Path":"/media/movies"}]},{"Name":"TV","SubFolders":[{"Path":"/media/tv"}]}]`)
+			return
+		}
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
@@ -373,10 +377,12 @@ func TestEmbyConnectionUsesCompatibilityInfoRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Test: %v", err)
 	}
-	if !strings.Contains(message, "Test Emby") {
-		t.Errorf("connection message = %q", message)
+	if !strings.Contains(message, "Test Emby") || !strings.Contains(message, "Movies") || !strings.Contains(message, "TV") {
+		t.Errorf("connection message = %q, want server details and library names", message)
 	}
-	if !reflect.DeepEqual(paths, []string{"/emby/System/Info", "/System/Info"}) {
+	if !reflect.DeepEqual(paths, []string{
+		"/emby/System/Info", "/System/Info", "/emby/Library/SelectableMediaFolders",
+	}) {
 		t.Errorf("requested paths %v", paths)
 	}
 }
