@@ -227,3 +227,162 @@ func TestEnqueueChecksTriggerPathBeforeGlobalRewrite(t *testing.T) {
 		t.Fatalf("filesystem check path = %q, want original mounted path %q", p.checkPath, want)
 	}
 }
+
+
+func TestEmbyKnownFilesHandlesLargePaginatedResponses(t *testing.T) {
+	oldPageSize := pageSize
+	pageSize = 1
+	defer func() { pageSize = oldPageSize }()
+
+	type mediaSource struct {
+		Path string
+	}
+	type item struct {
+		Path         string
+		MediaSources []mediaSource
+	}
+
+	var offsets []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/Items" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("X-Emby-Token") != "emby-test-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Query().Get("Limit") != "1" {
+			t.Errorf("Limit = %q, want 1", r.URL.Query().Get("Limit"))
+		}
+		offset := r.URL.Query().Get("StartIndex")
+		offsets = append(offsets, offset)
+
+		out := struct {
+			Items            []item
+			TotalRecordCount int
+			Padding          string
+		}{TotalRecordCount: 2}
+		switch offset {
+		case "0":
+			out.Items = []item{{
+				Path: "/emby/movies/First.mkv",
+				MediaSources: []mediaSource{{Path: "/emby/movies/First-version.mkv"}},
+			}}
+			// Ensure a response exceeds the old 4 MiB reader limit.
+			out.Padding = strings.Repeat("x", 4<<20)
+		case "1":
+			out.Items = []item{{Path: "/emby/movies/Second.mkv"}}
+		default:
+			t.Errorf("unexpected StartIndex %q", offset)
+		}
+		if err := json.NewEncoder(w).Encode(out); err != nil {
+			t.Errorf("encoding response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	target := Target{Type: "emby", URL: srv.URL, Token: "emby-test-token"}
+	known, err := target.KnownFiles(nil, time.Time{}, nil)
+	if err != nil {
+		t.Fatalf("KnownFiles: %v", err)
+	}
+	if !reflect.DeepEqual(offsets, []string{"0", "1"}) {
+		t.Fatalf("requested offsets %v, want [0 1]", offsets)
+	}
+	for _, path := range []string{
+		"/emby/movies/First.mkv",
+		"/emby/movies/First-version.mkv",
+		"/emby/movies/Second.mkv",
+	} {
+		if !known[normPath(path)] {
+			t.Errorf("missing indexed path %q", path)
+		}
+	}
+}
+
+func TestEmbyScanUsesAutoscanNotificationFormat(t *testing.T) {
+	var gotPath, gotUpdateType string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/Library/Media/Updated" {
+			t.Errorf("request = %s %s, want POST /Library/Media/Updated", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("X-Emby-Token") != "emby-test-token" {
+			t.Errorf("X-Emby-Token = %q", r.Header.Get("X-Emby-Token"))
+		}
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("Content-Type = %q", r.Header.Get("Content-Type"))
+		}
+		var payload struct {
+			Updates []struct {
+				Path       string `json:"path"`
+				UpdateType string `json:"updateType"`
+			} `json:"Updates"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decoding scan payload: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(payload.Updates) != 1 {
+			t.Errorf("got %d updates, want 1", len(payload.Updates))
+		} else {
+			gotPath = payload.Updates[0].Path
+			gotUpdateType = payload.Updates[0].UpdateType
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	target := Target{Type: "emby", URL: srv.URL, Token: "emby-test-token"}
+	if message, err := target.Scan("/media/New Movie"); err != nil {
+		t.Fatalf("Scan: %v", err)
+	} else if message != "scan requested" {
+		t.Errorf("Scan message = %q", message)
+	}
+	if gotPath != "/media/New Movie" {
+		t.Errorf("path = %q, want /media/New Movie", gotPath)
+	}
+	if gotUpdateType != "Created" {
+		t.Errorf("updateType = %q, want Created", gotUpdateType)
+	}
+}
+
+func TestEmbyConnectionUsesCompatibilityInfoRoute(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.Header.Get("X-Emby-Token") != "emby-test-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == "/emby/System/Info" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/System/Info" {
+			io.WriteString(w, `{"ServerName":"Test Emby","Version":"4.8.0"}`)
+			return
+		}
+		if r.URL.Path == "/emby/Library/SelectableMediaFolders" {
+			io.WriteString(w, `[{"Name":"Movies","SubFolders":[{"Path":"/media/movies"}]},{"Name":"TV","SubFolders":[{"Path":"/media/tv"}]}]`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	target := Target{Type: "emby", URL: srv.URL, Token: "emby-test-token"}
+	message, err := target.Test()
+	if err != nil {
+		t.Fatalf("Test: %v", err)
+	}
+	if !strings.Contains(message, "Test Emby") || !strings.Contains(message, "Movies") || !strings.Contains(message, "TV") {
+		t.Errorf("connection message = %q, want server details and library names", message)
+	}
+	if !reflect.DeepEqual(paths, []string{
+		"/emby/System/Info", "/System/Info", "/emby/Library/SelectableMediaFolders",
+	}) {
+		t.Errorf("requested paths %v", paths)
+	}
+}

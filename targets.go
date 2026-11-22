@@ -13,13 +13,26 @@ import (
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
+// Media server item listings are paginated, but a page can still exceed 4 MiB
+// when MediaSources are included. Keep a generous per-response ceiling while
+// detecting oversized responses instead of silently truncating their JSON.
+const maxAPIResponseBytes int64 = 64 << 20
+
 func doRequest(req *http.Request) ([]byte, error) {
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	// Read the complete response up to a generous safety ceiling. The old
+	// 4 MiB limit silently truncated larger Emby/Jellyfin JSON responses.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
+	if int64(len(body)) > maxAPIResponseBytes {
+		return nil, fmt.Errorf("response body exceeds %d MiB limit", maxAPIResponseBytes>>20)
+	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("authentication failed (HTTP %d): check the token", resp.StatusCode)
 	}
@@ -66,11 +79,25 @@ func (t Target) Test() (string, error) {
 		}
 		return fmt.Sprintf("Connected. Libraries: %s", strings.Join(names, ", ")), nil
 	case "jellyfin", "emby":
-		req, err := t.newRequest("GET", "/System/Info", nil)
+		infoPath := "/System/Info"
+		if t.Type == "emby" {
+			// Match the Emby API compatibility route used by Autoscan.
+			infoPath = "/emby/System/Info"
+		}
+		req, err := t.newRequest("GET", infoPath, nil)
 		if err != nil {
 			return "", err
 		}
 		body, err := doRequest(req)
+		if err != nil && t.Type == "emby" && strings.Contains(err.Error(), "HTTP 404") {
+			// Some reverse proxies expose Emby's System API without the
+			// /emby compatibility prefix.
+			req, reqErr := t.newRequest("GET", "/System/Info", nil)
+			if reqErr != nil {
+				return "", reqErr
+			}
+			body, err = doRequest(req)
+		}
 		if err != nil {
 			return "", err
 		}
@@ -79,9 +106,73 @@ func (t Target) Test() (string, error) {
 			Version    string
 		}
 		_ = json.Unmarshal(body, &info)
+		if t.Type == "emby" {
+			libraries, err := t.embyLibraries()
+			if err != nil {
+				return "", fmt.Errorf("retrieving Emby libraries: %w", err)
+			}
+			names := make([]string, 0, len(libraries))
+			seen := map[string]bool{}
+			for _, lib := range libraries {
+				if lib.Name != "" && !seen[lib.Name] {
+					names = append(names, lib.Name)
+					seen[lib.Name] = true
+				}
+			}
+			return fmt.Sprintf("Connected to %s (version %s). Libraries: %s",
+				info.ServerName, info.Version, strings.Join(names, ", ")), nil
+		}
 		return fmt.Sprintf("Connected to %s (version %s)", info.ServerName, info.Version), nil
 	}
 	return "", fmt.Errorf("unknown target type %q", t.Type)
+}
+
+// embyLibrary describes one path exposed by Emby's selectable library folders.
+type embyLibrary struct {
+	Name string
+	Path string
+}
+
+// embyLibraries retrieves library roots using the same endpoint as Autoscan.
+func (t Target) embyLibraries() ([]embyLibrary, error) {
+	req, err := t.newRequest("GET", "/emby/Library/SelectableMediaFolders", nil)
+	if err != nil {
+		return nil, err
+	}
+	body, err := doRequest(req)
+	if err != nil && strings.Contains(err.Error(), "HTTP 404") {
+		// Some reverse proxies expose Emby's library API without /emby.
+		req, reqErr := t.newRequest("GET", "/Library/SelectableMediaFolders", nil)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		body, err = doRequest(req)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var response []struct {
+		Name    string `json:"Name"`
+		Folders []struct {
+			Path string `json:"Path"`
+		} `json:"SubFolders"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("unexpected response from Emby libraries: %w", err)
+	}
+
+	libraries := make([]embyLibrary, 0)
+	for _, lib := range response {
+		for _, folder := range lib.Folders {
+			p := folder.Path
+			if len(p) > 0 && p[len(p)-1] != '/' {
+				p += "/"
+			}
+			libraries = append(libraries, embyLibrary{Name: lib.Name, Path: p})
+		}
+	}
+	return libraries, nil
 }
 
 // Scan asks the media server to scan a folder.
@@ -159,9 +250,22 @@ func (t Target) plexScan(path string) (string, error) {
 }
 
 func (t Target) embyScan(path string) (string, error) {
-	payload, _ := json.Marshal(map[string]any{
-		"Updates": []map[string]string{{"Path": path, "UpdateType": "Modified"}},
+	updateType := "Modified" // Jellyfin's scan notification type.
+	if t.Type == "emby" {
+		updateType = "Created" // Match Autoscan's Emby notification contract.
+	}
+	type scanRequest struct {
+		Path       string `json:"path"`
+		UpdateType string `json:"updateType"`
+	}
+	payload, err := json.Marshal(struct {
+		Updates []scanRequest `json:"Updates"`
+	}{
+		Updates: []scanRequest{{Path: path, UpdateType: updateType}},
 	})
+	if err != nil {
+		return "", fmt.Errorf("encoding scan request: %w", err)
+	}
 	req, err := t.newRequest("POST", "/Library/Media/Updated", bytes.NewReader(payload))
 	if err != nil {
 		return "", err
