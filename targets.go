@@ -13,19 +13,25 @@ import (
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
+// Media server item listings are paginated, but a page can still exceed 4 MiB
+// when MediaSources are included. Keep a generous per-response ceiling while
+// detecting oversized responses instead of silently truncating their JSON.
+const maxAPIResponseBytes int64 = 64 << 20
+
 func doRequest(req *http.Request) ([]byte, error) {
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	// Read the complete response. Emby/Jellyfin library listings can exceed
-	// 4 MiB even when requested in pages, especially when MediaSources are
-	// included. Limiting the body silently truncated valid JSON and caused
-	// "unexpected end of JSON input" during Library Check.
-	body, err := io.ReadAll(resp.Body)
+	// Read the complete response up to a generous safety ceiling. The old
+	// 4 MiB limit silently truncated larger Emby/Jellyfin JSON responses.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
+	}
+	if int64(len(body)) > maxAPIResponseBytes {
+		return nil, fmt.Errorf("response body exceeds %d MiB limit", maxAPIResponseBytes>>20)
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("authentication failed (HTTP %d): check the token", resp.StatusCode)
@@ -73,11 +79,25 @@ func (t Target) Test() (string, error) {
 		}
 		return fmt.Sprintf("Connected. Libraries: %s", strings.Join(names, ", ")), nil
 	case "jellyfin", "emby":
-		req, err := t.newRequest("GET", "/System/Info", nil)
+		infoPath := "/System/Info"
+		if t.Type == "emby" {
+			// Match the Emby API compatibility route used by Autoscan.
+			infoPath = "/emby/System/Info"
+		}
+		req, err := t.newRequest("GET", infoPath, nil)
 		if err != nil {
 			return "", err
 		}
 		body, err := doRequest(req)
+		if err != nil && t.Type == "emby" && strings.Contains(err.Error(), "HTTP 404") {
+			// Some reverse proxies expose Emby's System API without the
+			// /emby compatibility prefix.
+			req, reqErr := t.newRequest("GET", "/System/Info", nil)
+			if reqErr != nil {
+				return "", reqErr
+			}
+			body, err = doRequest(req)
+		}
 		if err != nil {
 			return "", err
 		}
@@ -166,9 +186,22 @@ func (t Target) plexScan(path string) (string, error) {
 }
 
 func (t Target) embyScan(path string) (string, error) {
-	payload, _ := json.Marshal(map[string]any{
-		"Updates": []map[string]string{{"Path": path, "UpdateType": "Modified"}},
+	updateType := "Modified" // Jellyfin's scan notification type.
+	if t.Type == "emby" {
+		updateType = "Created" // Match Autoscan's Emby notification contract.
+	}
+	type scanRequest struct {
+		Path       string `json:"path"`
+		UpdateType string `json:"updateType"`
+	}
+	payload, err := json.Marshal(struct {
+		Updates []scanRequest `json:"Updates"`
+	}{
+		Updates: []scanRequest{{Path: path, UpdateType: updateType}},
 	})
+	if err != nil {
+		return "", fmt.Errorf("encoding scan request: %w", err)
+	}
 	req, err := t.newRequest("POST", "/Library/Media/Updated", bytes.NewReader(payload))
 	if err != nil {
 		return "", err
