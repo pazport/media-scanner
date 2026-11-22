@@ -106,9 +106,73 @@ func (t Target) Test() (string, error) {
 			Version    string
 		}
 		_ = json.Unmarshal(body, &info)
+		if t.Type == "emby" {
+			libraries, err := t.embyLibraries()
+			if err != nil {
+				return "", fmt.Errorf("retrieving Emby libraries: %w", err)
+			}
+			names := make([]string, 0, len(libraries))
+			seen := map[string]bool{}
+			for _, lib := range libraries {
+				if lib.Name != "" && !seen[lib.Name] {
+					names = append(names, lib.Name)
+					seen[lib.Name] = true
+				}
+			}
+			return fmt.Sprintf("Connected to %s (version %s). Libraries: %s",
+				info.ServerName, info.Version, strings.Join(names, ", ")), nil
+		}
 		return fmt.Sprintf("Connected to %s (version %s)", info.ServerName, info.Version), nil
 	}
 	return "", fmt.Errorf("unknown target type %q", t.Type)
+}
+
+// embyLibrary describes one path exposed by Emby's selectable library folders.
+type embyLibrary struct {
+	Name string
+	Path string
+}
+
+// embyLibraries retrieves library roots using the same endpoint as Autoscan.
+func (t Target) embyLibraries() ([]embyLibrary, error) {
+	req, err := t.newRequest("GET", "/emby/Library/SelectableMediaFolders", nil)
+	if err != nil {
+		return nil, err
+	}
+	body, err := doRequest(req)
+	if err != nil && strings.Contains(err.Error(), "HTTP 404") {
+		// Some reverse proxies expose Emby's library API without /emby.
+		req, reqErr := t.newRequest("GET", "/Library/SelectableMediaFolders", nil)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		body, err = doRequest(req)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var response []struct {
+		Name    string `json:"Name"`
+		Folders []struct {
+			Path string `json:"Path"`
+		} `json:"SubFolders"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("unexpected response from Emby libraries: %w", err)
+	}
+
+	libraries := make([]embyLibrary, 0)
+	for _, lib := range response {
+		for _, folder := range lib.Folders {
+			p := strings.TrimRight(folder.Path, "/")
+			if p != "" {
+				p += "/"
+			}
+			libraries = append(libraries, embyLibrary{Name: lib.Name, Path: p})
+		}
+	}
+	return libraries, nil
 }
 
 // Scan asks the media server to scan a folder.
