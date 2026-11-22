@@ -150,7 +150,7 @@ func (t Target) embyFiles(since time.Time, progress pageProgress) (map[string]bo
 		}
 		body, err := doRequest(req)
 		if err != nil {
-			return nil, fmt.Errorf("listing items: %w", err)
+			return nil, fmt.Errorf("listing items at offset %d: %w", start, err)
 		}
 		var res struct {
 			Items []struct {
@@ -160,7 +160,7 @@ func (t Target) embyFiles(since time.Time, progress pageProgress) (map[string]bo
 			TotalRecordCount int
 		}
 		if err := json.Unmarshal(body, &res); err != nil {
-			return nil, fmt.Errorf("unexpected response from %s: %w", t.Type, err)
+			return nil, fmt.Errorf("unexpected response from %s at offset %d (%d bytes): %w", t.Type, start, len(body), err)
 		}
 		for _, it := range res.Items {
 			if it.Path != "" {
@@ -174,7 +174,13 @@ func (t Target) embyFiles(since time.Time, progress pageProgress) (map[string]bo
 			}
 		}
 		progress("", start+len(res.Items), res.TotalRecordCount)
-		if len(res.Items) < pageSize || (res.TotalRecordCount > 0 && start+len(res.Items) >= res.TotalRecordCount) {
+		if len(res.Items) == 0 || (res.TotalRecordCount > 0 && start+len(res.Items) >= res.TotalRecordCount) {
+			break
+		}
+		// Some Emby-compatible servers may return fewer than the requested
+		// page size while still reporting additional records. Continue using
+		// the server's total count rather than treating a short page as EOF.
+		if res.TotalRecordCount == 0 && len(res.Items) < pageSize {
 			break
 		}
 	}
