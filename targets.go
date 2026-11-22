@@ -19,7 +19,14 @@ func doRequest(req *http.Request) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	// Read the complete response. Emby/Jellyfin library listings can exceed
+	// 4 MiB even when requested in pages, especially when MediaSources are
+	// included. Limiting the body silently truncated valid JSON and caused
+	// "unexpected end of JSON input" during Library Check.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("authentication failed (HTTP %d): check the token", resp.StatusCode)
 	}
