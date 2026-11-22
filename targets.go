@@ -165,8 +165,8 @@ func (t Target) embyLibraries() ([]embyLibrary, error) {
 	libraries := make([]embyLibrary, 0)
 	for _, lib := range response {
 		for _, folder := range lib.Folders {
-			p := strings.TrimRight(folder.Path, "/")
-			if p != "" {
+			p := folder.Path
+			if len(p) > 0 && p[len(p)-1] != '/' {
 				p += "/"
 			}
 			libraries = append(libraries, embyLibrary{Name: lib.Name, Path: p})
